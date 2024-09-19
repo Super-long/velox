@@ -203,6 +203,10 @@ target_link_libraries(
   velox_in_10_min_demo
   velox_aggregates
   velox_type
+  velox_dwio_parquet_reader
+  velox_dwio_parquet_writer
+  velox_hive_connector
+  velox_expression
   velox_vector
   velox_vector_test_lib
   velox_exec
