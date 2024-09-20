@@ -16,6 +16,8 @@
 
 #include "velox/dwio/parquet/reader/ParquetReader.h"
 
+#include <typeinfo>
+#include <boost/algorithm/string.hpp>
 #include <thrift/protocol/TCompactProtocol.h> //@manual
 
 #include "velox/dwio/parquet/reader/ParquetColumnReader.h"
@@ -969,6 +971,16 @@ class ParquetRowReader::Impl {
     if (auto& metadataFilter = options_.metadataFilter()) {
       metadataFilter->eval(res.metadataFilterResults, res.filterResult);
     }
+    
+    auto accessPlan = ParquetAccessPlan::NewAll(rowGroups_.size());
+    auto parquetFormatOptions = std::dynamic_pointer_cast<ParquetOptions>(options_.formatSpecificOptions());
+    if (parquetFormatOptions && parquetFormatOptions->parquetAccessPlan()->Size() == rowGroups_.size()) {
+      std::cerr << "before " << accessPlan.toString() << std::endl;
+      accessPlan = *parquetFormatOptions->parquetAccessPlan().get();
+      std::cerr << "after " << accessPlan.toString() << std::endl;
+    }
+
+    std::cerr << accessPlan.toString() << " " << rowGroups_.size() << std::endl;
 
     uint64_t rowNumber = 0;
     for (auto i = 0; i < rowGroups_.size(); i++) {
@@ -988,7 +1000,7 @@ class ParquetRowReader::Impl {
 
       // Add a row group to read if it is within range and not empty and not in
       // the excluded list.
-      if (rowGroupInRange && !isExcluded && !isEmpty) {
+      if (rowGroupInRange && !isExcluded && !isEmpty && accessPlan.ShouldScan(i)) {
         rowGroupIds_.push_back(i);
         firstRowOfRowGroup_.push_back(rowNumber);
       }
@@ -1020,6 +1032,7 @@ class ParquetRowReader::Impl {
     if (rowsToRead == kAtEnd) {
       return 0;
     }
+    //std::cout << "The type of columnReader_ is: " << typeid(*columnReader_).name() << std::endl;
     VELOX_DCHECK_GT(rowsToRead, 0);
     if (!options_.rowNumberColumnInfo().has_value()) {
       columnReader_->next(rowsToRead, result, mutation);

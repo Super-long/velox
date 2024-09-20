@@ -41,6 +41,8 @@
 #include "velox/functions/Udf.h"
 #include "velox/expression/ExprToSubfieldFilter.h"
 
+#include "velox/dwio/common/Options.h"
+
 using namespace facebook::velox;
 using namespace facebook::velox::test;
 using namespace facebook::velox::exec::test;
@@ -3169,10 +3171,10 @@ void BaradCOSQ8_TableScan_15(bool print_result) {
         if (!input) {
             auto end = std::chrono::high_resolution_clock::now();
             auto duration = std::chrono::duration<double>(end - start).count();
-            std::cout << "BaradCOSQ8 kParallel Execution time: " << duration << " seconds" << std::endl;
+            std::cout << "BaradCOSQ8_TableScan_15 kParallel Execution time: " << duration << " seconds" << std::endl;
             return exec::BlockingReason::kNotBlocked;
         }
-        std::cout << "BaradCOSQ8 kParallel input->size():" << input->size() << std::endl;
+        std::cout << "BaradCOSQ8_TableScan_15 kParallel input->size():" << input->size() << std::endl;
         if (print_result) {
             for (vector_size_t i = 0; i < input->size(); ++i) {
                 std::cout << i << ": " << input->toString(i) << "|||" << std::endl;
@@ -3193,10 +3195,37 @@ void BaradCOSQ8_TableScan_15(bool print_result) {
 
     int index = 0;
     for (auto& filePath : fs::directory_iterator(directoryPath)) {
+        auto parquetAccessPlan = parquet::ParquetAccessPlan::NewAll(4);
+        auto parquetOptions = std::make_shared<parquet::ParquetOptions>();
+        parquetOptions->setParquetAccessPlan(std::make_shared<parquet::ParquetAccessPlan>(parquetAccessPlan));
+
+        uint64_t _start = 0;
+        uint64_t _length = std::numeric_limits<uint64_t>::max();
+        std::unordered_map<std::string, std::optional<std::string>> _partitionKeys;
+        std::optional<int32_t> _tableBucketNumber = std::nullopt;
+        std::unordered_map<std::string, std::string> _customSplitInfo;
+        std::shared_ptr<std::string> _extraFileInfo;
+        std::unordered_map<std::string, std::string> _serdeParameters;
+        int64_t _splitWeight = 0;
+        std::unordered_map<std::string, std::string> _infoColumns;
+        std::optional<FileProperties> _properties = std::nullopt;
+
         auto connectorSplit = std::make_shared<connector::hive::HiveConnectorSplit>(
             kHiveConnectorId,
             filePath.path().string(),
-            dwio::common::FileFormat::PARQUET);
+            dwio::common::FileFormat::PARQUET,
+            _start,
+            _length,
+            _partitionKeys,
+            _tableBucketNumber,
+            _customSplitInfo,
+            _extraFileInfo,
+            _serdeParameters,
+            _splitWeight,
+            _infoColumns,
+            _properties,
+            parquetOptions);
+
         if (index % 5 == 0) {
             readTask->addSplit(test_plan1_scanNodeId, exec::Split{connectorSplit});
         } else if (index % 5 == 1) {
@@ -3221,7 +3250,7 @@ void BaradCOSQ8_TableScan_15(bool print_result) {
     readTask->start(maxDrivers);
 
     std::this_thread::sleep_for(std::chrono::seconds(5));
-    std::cerr << "BaradCOSQ1 kParallel after sleep" << std::endl;
+    std::cerr << "BaradCOSQ8_TableScan_15 kParallel after sleep" << std::endl;
 }
 
 void BaradCOSQ8_Filter_15(bool print_result) {

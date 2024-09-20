@@ -61,6 +61,7 @@ struct HiveConnectorSplit : public connector::ConnectorSplit {
   /// These represent file properties like file size that are used while opening
   /// the file handle.
   std::optional<FileProperties> properties;
+  std::shared_ptr<dwio::common::FormatSpecificOptions> formatSpecificOptions;
 
   HiveConnectorSplit(
       const std::string& connectorId,
@@ -76,7 +77,8 @@ struct HiveConnectorSplit : public connector::ConnectorSplit {
       const std::unordered_map<std::string, std::string>& _serdeParameters = {},
       int64_t _splitWeight = 0,
       const std::unordered_map<std::string, std::string>& _infoColumns = {},
-      std::optional<FileProperties> _properties = std::nullopt)
+      std::optional<FileProperties> _properties = std::nullopt,
+      const std::shared_ptr<dwio::common::FormatSpecificOptions>& _formatSpecificOptions = {})
       : ConnectorSplit(connectorId, _splitWeight),
         filePath(_filePath),
         fileFormat(_fileFormat),
@@ -88,7 +90,8 @@ struct HiveConnectorSplit : public connector::ConnectorSplit {
         extraFileInfo(_extraFileInfo),
         serdeParameters(_serdeParameters),
         infoColumns(_infoColumns),
-        properties(_properties) {}
+        properties(_properties),
+        formatSpecificOptions(_formatSpecificOptions) {}
 
   std::string toString() const override;
 

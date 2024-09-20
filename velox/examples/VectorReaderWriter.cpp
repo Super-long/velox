@@ -149,6 +149,14 @@ int main() {
 
     std::cout << "]" << std::endl;
   });
+  std::cout << "lzlzlzl" << std::endl;
+
+  #ifdef VELOX_ENABLE_PARQUET
+      std::cout << "Parquet support is enabled." << std::endl;
+  #else
+      std::cout << "Parquet support is not enabled." << std::endl;
+  #endif
+  std::cout << "ywqywq" << std::endl;
 
   return 0;
 }

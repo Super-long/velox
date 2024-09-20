@@ -20,6 +20,7 @@
 #include "velox/dwio/common/ReaderFactory.h"
 #include "velox/dwio/parquet/reader/Metadata.h"
 #include "velox/dwio/parquet/reader/ParquetStatsContext.h"
+#include "velox/dwio/parquet/reader/ParquetAccessPlan.h"
 
 namespace facebook::velox::dwio::common {
 
@@ -29,6 +30,21 @@ class BufferedInput;
 } // namespace facebook::velox::dwio::common
 
 namespace facebook::velox::parquet {
+
+class ParquetOptions : public dwio::common::FormatSpecificOptions {
+ public:
+  void setParquetAccessPlan(
+      std::shared_ptr<ParquetAccessPlan> parquetAccessPlan) {
+    parquetAccessPlan_ = std::move(parquetAccessPlan);
+  }
+
+  const std::shared_ptr<ParquetAccessPlan>& parquetAccessPlan() const {
+    return parquetAccessPlan_;
+  }
+
+ private:
+  std::shared_ptr<ParquetAccessPlan> parquetAccessPlan_;
+};
 
 enum class ParquetMetricsType { HEADER, FILE_METADATA, FILE, BLOCK, TEST };
 

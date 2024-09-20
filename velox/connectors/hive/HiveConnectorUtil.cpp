@@ -615,6 +615,7 @@ void configureRowReaderOptions(
   rowReaderOptions.setMetadataFilter(std::move(metadataFilter));
   rowReaderOptions.setRequestedType(rowType);
   rowReaderOptions.range(hiveSplit->start, hiveSplit->length);
+  rowReaderOptions.setFormatSpecificOptions(hiveSplit->formatSpecificOptions);
   if (hiveConfig && sessionProperties) {
     rowReaderOptions.setTimestampPrecision(static_cast<TimestampPrecision>(
         hiveConfig->readTimestampUnit(sessionProperties)));

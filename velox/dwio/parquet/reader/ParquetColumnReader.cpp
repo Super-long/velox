@@ -45,37 +45,46 @@ std::unique_ptr<dwio::common::SelectiveColumnReader> ParquetColumnReader::build(
     case TypeKind::SMALLINT:
     case TypeKind::TINYINT:
     case TypeKind::HUGEINT:
+      //std::cout << "ParquetColumnReader::build IntegerColumnReader\n";
       return std::make_unique<IntegerColumnReader>(
           requestedType, fileType, params, scanSpec);
 
     case TypeKind::REAL:
+      //std::cout << "ParquetColumnReader::build FloatingPointColumnReader\n";
       return std::make_unique<FloatingPointColumnReader<float, float>>(
           requestedType, fileType, params, scanSpec);
     case TypeKind::DOUBLE:
+      //std::cout << "ParquetColumnReader::build FloatingPointColumnReader\n";
       return std::make_unique<FloatingPointColumnReader<double, double>>(
           requestedType, fileType, params, scanSpec);
 
     case TypeKind::ROW:
+      //std::cout << "ParquetColumnReader::build StructColumnReader\n";
       return std::make_unique<StructColumnReader>(
           requestedType, fileType, params, scanSpec);
 
     case TypeKind::VARBINARY:
     case TypeKind::VARCHAR:
+      //std::cout << "ParquetColumnReader::build StringColumnReader\n";
       return std::make_unique<StringColumnReader>(fileType, params, scanSpec);
 
     case TypeKind::ARRAY:
+      //std::cout << "ParquetColumnReader::build ListColumnReader\n";
       return std::make_unique<ListColumnReader>(
           requestedType, fileType, params, scanSpec);
 
     case TypeKind::MAP:
+      //std::cout << "ParquetColumnReader::build MapColumnReader\n";
       return std::make_unique<MapColumnReader>(
           requestedType, fileType, params, scanSpec);
 
     case TypeKind::BOOLEAN:
+      //std::cout << "ParquetColumnReader::build BooleanColumnReader\n";
       return std::make_unique<BooleanColumnReader>(
           requestedType, fileType, params, scanSpec);
 
     case TypeKind::TIMESTAMP:
+      //std::cout << "ParquetColumnReader::build TimestampColumnReader\n";
       return std::make_unique<TimestampColumnReader>(
           requestedType, fileType, params, scanSpec);
 
