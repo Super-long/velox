@@ -88,8 +88,8 @@ public:
         row_selection_ = row_selection;
         is_all_ = false;
     }
-    void SetSkip(bool is_skip) { is_skip_ = is_skip; }
-    void SetAll(bool is_all) { is_all_ = is_all; }
+    void SetSkip(bool is_skip) { is_skip_ = is_skip; is_all_ = !is_skip; }
+    void SetAll(bool is_all) { is_all_ = is_all; is_skip_ = !is_all; }
 
     RowSelection GetRowGroupAccess() const noexcept { return row_selection_; }
     bool IsSkip() const noexcept { return is_skip_; }

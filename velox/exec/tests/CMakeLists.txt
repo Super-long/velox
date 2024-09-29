@@ -212,7 +212,8 @@ target_link_libraries(
   velox_exec
   velox_exec_test_lib
   velox_tpch_connector
-  velox_memory)
+  velox_memory
+  arrow)
 
 # RowNumber Fuzzer.
 add_executable(velox_row_number_fuzzer_test RowNumberFuzzerTest.cpp)

@@ -974,13 +974,16 @@ class ParquetRowReader::Impl {
     
     auto accessPlan = ParquetAccessPlan::NewAll(rowGroups_.size());
     auto parquetFormatOptions = std::dynamic_pointer_cast<ParquetOptions>(options_.formatSpecificOptions());
+    if (parquetFormatOptions) {
+      std::cerr << "parquetAccessPlan()->Size(): " << parquetFormatOptions->parquetAccessPlan()->Size() << "; rowGroups_.size() " << rowGroups_.size() << std::endl;
+    }
     if (parquetFormatOptions && parquetFormatOptions->parquetAccessPlan()->Size() == rowGroups_.size()) {
-      std::cerr << "before " << accessPlan.toString() << std::endl;
+      //std::cerr << "before " << accessPlan.toString() << std::endl;
       accessPlan = *parquetFormatOptions->parquetAccessPlan().get();
-      std::cerr << "after " << accessPlan.toString() << std::endl;
+      //std::cerr << "after " << accessPlan.toString() << std::endl;
     }
 
-    std::cerr << accessPlan.toString() << " " << rowGroups_.size() << std::endl;
+    //std::cout << accessPlan.toString() << " " << rowGroups_.size() << std::endl;
 
     uint64_t rowNumber = 0;
     for (auto i = 0; i < rowGroups_.size(); i++) {
@@ -1000,6 +1003,7 @@ class ParquetRowReader::Impl {
 
       // Add a row group to read if it is within range and not empty and not in
       // the excluded list.
+      //std::cout << accessPlan.ShouldScan(i) << " " << i << std::endl;
       if (rowGroupInRange && !isExcluded && !isEmpty && accessPlan.ShouldScan(i)) {
         rowGroupIds_.push_back(i);
         firstRowOfRowGroup_.push_back(rowNumber);
