@@ -203,6 +203,7 @@ target_link_libraries(
   velox_in_10_min_demo
   velox_aggregates
   velox_type
+  velox_dwio_native_parquet_reader
   velox_dwio_parquet_reader
   velox_dwio_parquet_writer
   velox_hive_connector

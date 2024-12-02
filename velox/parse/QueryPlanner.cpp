@@ -13,9 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#include <unordered_map>
+#include <iostream>
+
 #include "velox/parse/QueryPlanner.h"
 #include "velox/duckdb/conversion/DuckConversion.h"
 #include "velox/parse/DuckLogicalOperator.h"
+#include "velox/dwio/common/tests/utils/FilterGenerator.h"
+#include "velox/connectors/hive/TableHandle.h"
 
 #include <duckdb.hpp> // @manual
 #include <duckdb/main/connection.hpp> // @manual
@@ -51,12 +56,12 @@ class ColumnNameGenerator {
 struct QueryContext {
   PlanNodeIdGenerator planNodeIdGenerator;
   ColumnNameGenerator columnNameGenerator;
-  const std::unordered_map<std::string, std::vector<RowVectorPtr>>&
-      inMemoryTables;
+  const std::unordered_map<std::string, std::vector<RowVectorPtr>>& inMemoryTables;
+  const std::unordered_map<std::string, TableScanInfo>& inStorageTables;
 
-  QueryContext(const std::unordered_map<std::string, std::vector<RowVectorPtr>>&
-                   _inMemoryTables)
-      : inMemoryTables{_inMemoryTables} {}
+  QueryContext(const std::unordered_map<std::string, std::vector<RowVectorPtr>>& _inMemoryTables,
+               const std::unordered_map<std::string, TableScanInfo>&  _inStorageTables)
+      : inMemoryTables{_inMemoryTables}, inStorageTables{_inStorageTables} {}
 
   std::string nextNodeId() {
     return planNodeIdGenerator.next();
@@ -153,26 +158,59 @@ PlanNodePtr toVeloxPlan(
 
   auto rowType = ROW(std::move(names), std::move(types));
 
-  auto tableName = logicalGet.function.to_string(logicalGet.bind_data.get());
-  auto it = queryContext.inMemoryTables.find(tableName);
-  VELOX_CHECK(
-      it != queryContext.inMemoryTables.end(),
-      "Can't find in-memory table: {}",
-      tableName);
+  //std::cerr << "rowType: " << rowType->toString() << std::endl;
 
-  std::vector<RowVectorPtr> data;
-  for (auto& rowVector : it->second) {
-    std::vector<VectorPtr> children;
-    if (rowVector->size() > 0) {
-      for (auto i = 0; i < columnIds.size(); ++i) {
-        children.push_back(rowVector->childAt(columnIds[i]));
+  auto tableName = logicalGet.function.to_string(logicalGet.bind_data.get());
+  auto in_memory_it = queryContext.inMemoryTables.find(tableName);
+  if (in_memory_it != queryContext.inMemoryTables.end()) {
+    std::vector<RowVectorPtr> data;
+    for (auto& rowVector : in_memory_it->second) {
+      std::vector<VectorPtr> children;
+      if (rowVector->size() > 0) {
+        for (auto i = 0; i < columnIds.size(); ++i) {
+          children.push_back(rowVector->childAt(columnIds[i]));
+        }
       }
+      data.push_back(std::make_shared<RowVector>(
+          pool, rowType, nullptr, rowVector->size(), children));
     }
-    data.push_back(std::make_shared<RowVector>(
-        pool, rowType, nullptr, rowVector->size(), children));
+    return std::make_shared<ValuesNode>(queryContext.nextNodeId(), data);
   }
 
-  return std::make_shared<ValuesNode>(queryContext.nextNodeId(), data);
+  auto in_storage_it = queryContext.inStorageTables.find(tableName);
+  if (in_storage_it != queryContext.inStorageTables.end()) {
+    auto tableScanInfo = in_storage_it->second;
+    dwio::common::SubfieldFilters filters;
+    auto tableHandle = std::make_shared<connector::hive::HiveTableHandle>(
+        tableScanInfo.connector_id_,
+        tableName,
+        true,
+        std::move(filters),
+        /*remainingFilterExpr*/ nullptr,
+        tableScanInfo.dataColumns_);
+
+    std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>> assignments;
+    for (uint32_t i = 0; i < rowType->size(); ++i) {
+      const auto& name = rowType->nameOf(i);
+      const auto& type = rowType->childAt(i);
+      // 暂时不考虑别名
+      assignments.insert(
+          {name,
+          std::make_shared<connector::hive::HiveColumnHandle>(
+              name,
+              connector::hive::HiveColumnHandle::ColumnType::kRegular,
+              type,
+              type)});
+    }
+
+    return std::make_shared<core::TableScanNode>( 
+      queryContext.nextNodeId(), rowType, tableHandle, assignments);
+  }
+
+  VELOX_CHECK(
+      false,
+      "Can't find in-memory or in-storage table: {}",
+      tableName);
 }
 
 TypedExprPtr toVeloxExpression(
@@ -244,6 +282,7 @@ TypedExprPtr toVeloxExpression(
         children.push_back(toVeloxExpression(*child, inputType));
       }
 
+      // std::cerr << "agg->return_type: " << agg->return_type.ToString() << std::endl;
       return std::make_shared<CallTypedExpr>(
           duckdb::toVeloxType(agg->return_type),
           std::move(children),
@@ -326,6 +365,8 @@ PlanNodePtr toVeloxPlan(
             input->type(), projectNames.back()));
       }
     }
+
+    // std::cerr << call->type()->toString() << " " << call->name() << std::endl;
 
     aggregates.push_back({
         std::make_shared<CallTypedExpr>(
@@ -515,6 +556,66 @@ PlanNodePtr parseQuery(
   return planner.plan(sql);
 }
 
+std::shared_ptr<RowType> ConstructDataColumns(const std::vector<SplitInfo>& splitInfos) {
+  std::unordered_map<std::string, TypePtr> mergedColumns;
+
+  for (const auto& splitInfo : splitInfos) {
+    const auto& rowType = splitInfo.row_type_;
+
+    const auto& names = rowType.names();
+    const auto& types = rowType.children();
+
+    for (size_t i = 0; i < names.size(); ++i) {
+      const auto& name = names[i];
+      const auto& type = types[i];
+      if (mergedColumns.find(name) == mergedColumns.end()) {
+        mergedColumns[name] = type;
+      } else {
+        // 同名的情况下需要考虑类型冲突，暂时不考虑
+      }
+    }
+  }
+
+  std::vector<std::string> finalNames;
+  std::vector<TypePtr> finalTypes;
+
+  for (const auto& pair : mergedColumns) {
+    finalNames.push_back(pair.first);
+    finalTypes.push_back(pair.second);
+  }
+
+  return std::make_shared<RowType>(std::move(finalNames), std::move(finalTypes));
+}
+
+PlanNodePtr parseQuery(
+    const std::string& sql,
+    memory::MemoryPool* pool,
+    const std::unordered_map<std::string, TableScanInfo>&
+        hiveDataSources) {
+  DuckDbQueryPlanner planner(pool);
+
+  for (auto& [name, tableScanInfo] : hiveDataSources) {
+    planner.registerTableScan(name, tableScanInfo);
+  }
+
+  return planner.plan(sql);
+}
+
+void DuckDbQueryPlanner::registerTableScan(
+      const std::string& name,
+      const TableScanInfo& tableScanInfo) {
+  VELOX_CHECK_EQ(
+      0, tableScans_.count(name), "TableScan is already registered: {}", name);
+
+  auto createTableSql =
+      duckdb::makeCreateTableSql(name, *tableScanInfo.dataColumns_);
+  auto res = conn_.Query(createTableSql);
+  VELOX_CHECK(
+      !res->HasError(), "Failed to create DuckDB table: {}", res->GetError());
+
+  tableScans_.insert({name, tableScanInfo});
+}
+
 void DuckDbQueryPlanner::registerTable(
     const std::string& name,
     const std::vector<RowVectorPtr>& data) {
@@ -573,7 +674,7 @@ PlanNodePtr DuckDbQueryPlanner::plan(const std::string& sql) {
 
   auto plan = conn_.ExtractPlan(sql);
 
-  QueryContext queryContext{tables_};
+  QueryContext queryContext{tables_, tableScans_};
   return toVeloxPlan(*plan, pool_, queryContext);
 }
 

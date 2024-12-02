@@ -19,6 +19,12 @@ add_test(velox_parse_test velox_parse_test)
 target_link_libraries(
   velox_parse_test
   velox_parse_parser
+  velox_hive_connector
+  velox_dwio_parquet_reader
+  velox_dwio_parquet_writer
+  velox_dwio_common
+  velox_common_compression
+  velox_exec_test_lib
   GTest::gtest
   GTest::gtest_main
   gflags::gflags)

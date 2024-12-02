@@ -131,7 +131,8 @@ TypePtr toVeloxType(LogicalType type, bool fileColumnNamesReadAsLowerCase) {
       uint8_t scale;
       type.GetDecimalProperties(width, scale);
       return DECIMAL(width, scale);
-    case LogicalTypeId::HUGEINT:
+    case LogicalTypeId::HUGEINT:  // duckdb中的hugeint推导和velox不同，
+      return BIGINT();
     case LogicalTypeId::DOUBLE:
       return DOUBLE();
     case LogicalTypeId::VARCHAR:
