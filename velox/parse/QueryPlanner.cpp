@@ -678,4 +678,14 @@ PlanNodePtr DuckDbQueryPlanner::plan(const std::string& sql) {
   return toVeloxPlan(*plan, pool_, queryContext);
 }
 
+std::unique_ptr<::duckdb::LogicalOperator>
+  DuckDbQueryPlanner::duckPlan(const std::string& sql) {
+  conn_.Query("PRAGMA disable_optimizer");
+  return conn_.ExtractPlan(sql);
+}
+
+PlanNodePtr DuckDbQueryPlanner::duckPlanConvertVeloxPlan(const std::unique_ptr<::duckdb::LogicalOperator>& duckdb_plan) {
+  QueryContext queryContext{tables_, tableScans_};
+  return toVeloxPlan(*duckdb_plan, pool_, queryContext);
+}
 } // namespace facebook::velox::core

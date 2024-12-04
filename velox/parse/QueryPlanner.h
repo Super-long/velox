@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 #pragma once
+#include <memory>
 
 #include "velox/core/PlanNode.h"
 #include "velox/parse/PlanNodeIdGenerator.h"
@@ -77,6 +78,10 @@ class DuckDbQueryPlanner {
       const TypePtr& returnType);
 
   PlanNodePtr plan(const std::string& sql);
+
+  std::unique_ptr<::duckdb::LogicalOperator> duckPlan(const std::string& sql);
+
+  PlanNodePtr duckPlanConvertVeloxPlan(const std::unique_ptr<::duckdb::LogicalOperator>& duckdb_plan);
 
  private:
   ::duckdb::DuckDB db_;

@@ -273,8 +273,13 @@ TEST_F(QueryPlannerTest, customAggregateFunctions) {
   planner.registerAggregateFunction(
       "bar_agg", {ARRAY(BIGINT()), BIGINT()}, ARRAY(BIGINT()));
 
-  auto plan = planner.plan(
+  auto duckdbPlan = planner.duckPlan(
       "SELECT foo_agg(x, x + 5), bar_agg([x], 1) FROM UNNEST([1, 2, 3]) as t(x)");
+
+  std::cerr << duckdbPlan->ToString() << std::endl;
+
+  auto plan = planner.duckPlanConvertVeloxPlan(duckdbPlan);
+
   ASSERT_EQ(
       plan->toString(false, true),
       "-- Project[5]\n"
