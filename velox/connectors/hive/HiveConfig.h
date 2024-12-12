@@ -76,6 +76,9 @@ class HiveConfig {
   /// S3-compatible storage system instead of AWS.
   static constexpr const char* kS3Endpoint = "hive.s3.endpoint";
 
+  /// AWS Region to use in signing requests.
+  static constexpr const char* kS3Region = "hive.s3.region";
+
   /// Default AWS access key to use.
   static constexpr const char* kS3AwsAccessKey = "hive.s3.aws-access-key";
 
@@ -272,6 +275,8 @@ class HiveConfig {
   bool s3UseInstanceCredentials() const;
 
   std::string s3Endpoint() const;
+
+  std::string s3Region() const;
 
   std::optional<std::string> s3AccessKey() const;
 

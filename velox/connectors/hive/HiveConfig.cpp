@@ -91,6 +91,10 @@ std::string HiveConfig::s3Endpoint() const {
   return config_->get(kS3Endpoint, std::string(""));
 }
 
+std::string HiveConfig::s3Region() const {
+  return config_->get(kS3Region, std::string(""));
+}
+
 std::optional<std::string> HiveConfig::s3AccessKey() const {
   return static_cast<std::optional<std::string>>(
       config_->get<std::string>(kS3AwsAccessKey));
