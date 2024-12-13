@@ -30,6 +30,8 @@
 #include <duckdb/planner/expression/bound_constant_expression.hpp> // @manual
 #include <duckdb/planner/expression/bound_function_expression.hpp> // @manual
 #include <duckdb/planner/expression/bound_reference_expression.hpp> // @manual
+#include <duckdb/parser/query_node/select_node.hpp> // @manual
+#include <duckdb/parser/tableref/basetableref.hpp> // @manual
 
 namespace facebook::velox::core {
 
@@ -682,6 +684,25 @@ std::unique_ptr<::duckdb::LogicalOperator>
   DuckDbQueryPlanner::duckPlan(const std::string& sql) {
   conn_.Query("PRAGMA disable_optimizer");
   return conn_.ExtractPlan(sql);
+}
+
+std::vector<std::string> DuckDbQueryPlanner::extractTableNames(const std::string& sql) {
+    std::vector<std::string> table_names;
+    auto sql_statements = conn_.ExtractStatements(sql);
+    for (auto &sql_statement : sql_statements) {
+        if (sql_statement->type == ::duckdb::StatementType::SELECT_STATEMENT) {
+            auto select_stmt = dynamic_cast<::duckdb::SelectStatement *>(sql_statement.get());
+
+            if (select_stmt->node->type == ::duckdb::QueryNodeType::SELECT_NODE) {
+              ::duckdb::SelectNode& select_node = select_stmt->node->Cast<::duckdb::SelectNode>();
+              if (select_node.from_table->type == ::duckdb::TableReferenceType::BASE_TABLE) {
+                  auto base_table = dynamic_cast<::duckdb::BaseTableRef *>(select_node.from_table.get());
+                  table_names.push_back(base_table->table_name);
+              }
+            }
+        }
+    }
+    return table_names;
 }
 
 PlanNodePtr DuckDbQueryPlanner::duckPlanConvertVeloxPlan(const std::unique_ptr<::duckdb::LogicalOperator>& duckdb_plan) {

@@ -228,9 +228,24 @@ TEST_F(QueryPlannerTest, inStorageTable) {
   };
 
   auto sql = "SELECT a, min(b), sum(b), sum(d), max(d) FROM t WHERE c > 5 GROUP BY 1";
+  // auto plan = parseQuery(sql, pool_.get(), inStorageTables);
 
-  auto plan = parseQuery(sql, pool_.get(), inStorageTables);
-  std::cerr << plan->toString(true, true) << std::endl;
+  DuckDbQueryPlanner planner(pool_.get());
+
+  auto table_names = planner.extractTableNames(sql);
+  for (auto name : table_names) {
+    std::cerr << "table: " << name << std::endl;
+  }
+
+  for (auto& [name, tableScanInfo] : inStorageTables) {
+    planner.registerTableScan(name, tableScanInfo);
+  }
+
+  auto duckPlan = planner.duckPlan(sql);
+  std::cerr << duckPlan->ToString() << std::endl;
+
+  auto plan = planner.duckPlanConvertVeloxPlan(duckPlan);
+  
   
   // step3: 构造split
   auto connectorSplit = std::make_shared<connector::hive::HiveConnectorSplit>(
@@ -249,6 +264,39 @@ TEST_F(QueryPlannerTest, inStorageTable) {
             << "> number of results in storage table test "
             << results->toString() << std::endl;
   std::cout << results->toString(0, results->size()) << std::endl;
+}
+
+TEST_F(QueryPlannerTest, extractTableNames) {
+  DuckDbQueryPlanner planner(pool_.get());
+
+  struct testCase {
+    std::string origin_sql;
+    std::vector<std::string> table_names;
+  };
+
+  std::vector<testCase> test_cases {
+    {
+      "SELECT sum(yottadb_pod_mem_bytes_rss) AS d0 FROM \"903_20620_prometheus_prod_default_d74d\" WHERE ((\"t.cluster_name\" = 'yottadb-dev-cqth-dp0' AND \"t.node_ip\" = '11.63.17.227' AND \"t.pod_name\" = 'db-scg0-1-5' AND \"t.region_name\" = 'cqth') AND \"t.zyx_instance_mark\" = '11.159.246.204') ",
+      {"903_20620_prometheus_prod_default_d74d"}
+    },
+    {
+      "select count(speed), count(temp), max(type), id from car where city='city_0' group by id ",
+      {"car"}
+    },
+    {
+      "select count(speed), count(temp), max(type), id from \"car\"",
+      {"car"}
+    },
+  };
+
+  for (auto test_case: test_cases) {
+    auto table_names = planner.extractTableNames(test_case.origin_sql);
+    std::cerr << test_case.origin_sql << std::endl;
+    for (auto name : table_names) {
+      std::cerr << "table: " << name << std::endl;
+    }
+  }
+  ASSERT_EQ(true, false);
 }
 
 TEST_F(QueryPlannerTest, customScalarFunctions) {

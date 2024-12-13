@@ -80,6 +80,7 @@ class DuckDbQueryPlanner {
   PlanNodePtr plan(const std::string& sql);
 
   std::unique_ptr<::duckdb::LogicalOperator> duckPlan(const std::string& sql);
+  std::vector<std::string> extractTableNames(const std::string& sql);
 
   PlanNodePtr duckPlanConvertVeloxPlan(const std::unique_ptr<::duckdb::LogicalOperator>& duckdb_plan);
 
