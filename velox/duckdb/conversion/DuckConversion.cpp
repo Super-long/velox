@@ -241,12 +241,12 @@ std::string makeCreateTableSql(
     const std::string& tableName,
     const RowType& rowType) {
   std::ostringstream sql;
-  sql << "CREATE TABLE " << tableName << "(";
+  sql << "CREATE TABLE \"" << tableName << "\"(";
   for (int32_t i = 0; i < rowType.size(); i++) {
     if (i > 0) {
       sql << ", ";
     }
-    sql << rowType.nameOf(i) << " ";
+    sql << "\"" << rowType.nameOf(i) << "\" ";
     toTypeSql(rowType.childAt(i), sql);
   }
   sql << ")";

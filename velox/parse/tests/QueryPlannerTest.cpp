@@ -219,6 +219,12 @@ TEST_F(QueryPlannerTest, inStorageTable) {
       ROW({"a", "b", "c", "d"}, {BIGINT(), INTEGER(), DOUBLE(), DOUBLE()})
       }
     },
+    {"903_20620_prometheus_prod_default_d74d",
+      {
+      kHiveConnectorId,
+      ROW({"t.alloc_affinity", "t.ap_name", "yottadb_partition_witness_replica_abnormal_offset"}, {BIGINT(), INTEGER(), DOUBLE()})
+      }
+    },
     {"u",
       {
       kHiveConnectorId,
