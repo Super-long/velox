@@ -57,6 +57,10 @@ class DuplicateRowNode : public core::PlanNode {
     return sources_;
   }
 
+  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+    sources_ = sources;
+  }
+
   std::string_view name() const override {
     return "duplicate row";
   }

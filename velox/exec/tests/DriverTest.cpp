@@ -56,6 +56,10 @@ class TestingPauserNode : public core::PlanNode {
     return sources_;
   }
 
+  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+    sources_ = sources;
+  }
+
   std::string_view name() const override {
     return "Pauser";
   }
@@ -867,6 +871,10 @@ class ThrowNode : public core::PlanNode {
     return sources_;
   }
 
+  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+    sources_ = sources;
+  }
+
   std::string_view name() const override {
     return "Throw";
   }
@@ -1000,6 +1008,10 @@ class BlockedNoFutureNode : public core::PlanNode {
 
   const std::vector<std::shared_ptr<const PlanNode>>& sources() const override {
     return sources_;
+  }
+
+  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+    sources_ = sources;
   }
 
   std::string_view name() const override {

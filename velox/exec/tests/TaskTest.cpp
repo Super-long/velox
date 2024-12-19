@@ -60,6 +60,11 @@ class TestSkewedJoinNode : public core::PlanNode {
     return sources_;
   }
 
+  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+    sources_ = sources;
+  }
+
+
   std::string_view name() const override {
     return "test skewed join";
   }
@@ -303,6 +308,11 @@ class TestExternalBlockableNode : public core::PlanNode {
     return sources_;
   }
 
+  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+    sources_ = sources;
+  }
+
+
   std::string_view name() const override {
     return "external blocking node";
   }
@@ -397,6 +407,10 @@ class TestBadMemoryNode : public core::PlanNode {
 
   const std::vector<core::PlanNodePtr>& sources() const override {
     return sources_;
+  }
+
+  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+    sources_ = sources;
   }
 
   std::string_view name() const override {

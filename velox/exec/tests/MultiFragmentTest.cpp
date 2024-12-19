@@ -1194,6 +1194,10 @@ class SlowNode : public core::PlanNode {
     return sources_;
   }
 
+  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+    sources_ = sources;
+  }
+
   std::string_view name() const override {
     return "slow";
   }
@@ -1348,6 +1352,8 @@ class TestCustomExchangeNode : public core::PlanNode {
     static std::vector<core::PlanNodePtr> kEmptySources;
     return kEmptySources;
   }
+
+  void changeSources(std::vector<std::shared_ptr<const PlanNode>>) override {}
 
   bool requiresExchangeClient() const override {
     return true;

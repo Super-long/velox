@@ -800,10 +800,6 @@ void ArrowStreamNode::addDetails(std::stringstream& stream) const {
   // Nothing to add.
 }
 
-const std::vector<PlanNodePtr>& ExchangeNode::sources() const {
-  return sources_;
-}
-
 void ExchangeNode::addDetails(std::stringstream& /* stream */) const {
   // Nothing to add.
 }
