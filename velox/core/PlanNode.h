@@ -1003,8 +1003,8 @@ class GroupIdNode : public PlanNode {
 
 class ExchangeNode : public PlanNode {
  public:
-  ExchangeNode(const PlanNodeId& id, RowTypePtr type)
-      : PlanNode(id), outputType_(type) {}
+  ExchangeNode(const PlanNodeId& id, RowTypePtr type, std::vector<PlanNodePtr> sources = {})
+      : PlanNode(id), outputType_(type), sources_(sources) {}
 
   const RowTypePtr& outputType() const override {
     return outputType_;
@@ -1030,7 +1030,7 @@ class ExchangeNode : public PlanNode {
 
  private:
   void addDetails(std::stringstream& stream) const override;
-
+  const std::vector<PlanNodePtr> sources_;
   RowTypePtr outputType_;
 };
 

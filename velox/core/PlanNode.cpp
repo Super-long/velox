@@ -801,7 +801,7 @@ void ArrowStreamNode::addDetails(std::stringstream& stream) const {
 }
 
 const std::vector<PlanNodePtr>& ExchangeNode::sources() const {
-  return kEmptySources;
+  return sources_;
 }
 
 void ExchangeNode::addDetails(std::stringstream& /* stream */) const {
