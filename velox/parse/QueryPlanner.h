@@ -82,7 +82,9 @@ class DuckDbQueryPlanner {
   std::unique_ptr<::duckdb::LogicalOperator> duckPlan(const std::string& sql);
   std::vector<std::string> extractTableNames(const std::string& sql);
 
-  PlanNodePtr duckPlanConvertVeloxPlan(const std::unique_ptr<::duckdb::LogicalOperator>& duckdb_plan);
+  PlanNodePtr duckPlanConvertVeloxPlan(
+    const std::unique_ptr<::duckdb::LogicalOperator>& duckdb_plan,
+    PlanNodeIdGenerator* planNodeIdGenerator);
 
  private:
   ::duckdb::DuckDB db_;

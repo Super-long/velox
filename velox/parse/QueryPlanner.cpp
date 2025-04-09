@@ -40,33 +40,37 @@ namespace {
 class ColumnNameGenerator {
  public:
   std::string next(const std::string& prefix = "_c") {
-    if (names_.count(prefix)) {
-      auto name = fmt::format("{}{}", prefix, nextId_++);
-      names_.insert(name);
+    auto iter = names_.find(prefix);
+    if (iter == names_.end()) {
+      names_[prefix] = 1;
+      return fmt::format("{}", prefix);;
+    } else {
+      auto name = fmt::format("{}{}", prefix, iter->second);
+      iter->second++;
+      names_[name] = 1;
       return name;
     }
-
-    names_.insert(prefix);
-    return prefix;
   }
 
  private:
-  std::unordered_set<std::string> names_;
-  int nextId_{0};
+  std::unordered_map<std::string, int> names_;
 };
 
 struct QueryContext {
-  PlanNodeIdGenerator planNodeIdGenerator;
-  ColumnNameGenerator columnNameGenerator;
+  QueryContext(const std::unordered_map<std::string, std::vector<RowVectorPtr>>& _inMemoryTables,
+               const std::unordered_map<std::string, TableScanInfo>&  _inStorageTables,
+               PlanNodeIdGenerator* _planNodeIdGenerator)
+      : inMemoryTables{_inMemoryTables},
+        inStorageTables{_inStorageTables},
+        planNodeIdGenerator(_planNodeIdGenerator) {}
+
   const std::unordered_map<std::string, std::vector<RowVectorPtr>>& inMemoryTables;
   const std::unordered_map<std::string, TableScanInfo>& inStorageTables;
-
-  QueryContext(const std::unordered_map<std::string, std::vector<RowVectorPtr>>& _inMemoryTables,
-               const std::unordered_map<std::string, TableScanInfo>&  _inStorageTables)
-      : inMemoryTables{_inMemoryTables}, inStorageTables{_inStorageTables} {}
+  PlanNodeIdGenerator* planNodeIdGenerator;
+  ColumnNameGenerator columnNameGenerator;
 
   std::string nextNodeId() {
-    return planNodeIdGenerator.next();
+    return planNodeIdGenerator->next();
   }
 
   std::string nextColumnName() {
@@ -116,6 +120,7 @@ PlanNodePtr toVeloxPlan(
   std::vector<std::string> names;
   std::vector<TypePtr> types;
   for (auto i = 0; i < logicalDummyScan.types.size(); ++i) {
+    // Value算子本身就没有name，可以生成
     names.push_back(queryContext.nextColumnName());
     types.push_back(duckdb::toVeloxType(logicalDummyScan.types[i]));
   }
@@ -316,18 +321,13 @@ PlanNodePtr toVeloxPlan(
     std::vector<PlanNodePtr> sources,
     QueryContext& queryContext) {
   std::vector<TypedExprPtr> projections;
+  std::vector<std::string> names;
   for (auto& expression : logicalProjection.expressions) {
+    names.push_back(queryContext.nextColumnName(expression->GetName()));
     projections.push_back(
         toVeloxExpression(*expression, sources[0]->outputType()));
   }
 
-  // TODO Figure out how to use these.
-  auto columnBindings = logicalProjection.GetColumnBindings();
-
-  std::vector<std::string> names;
-  for (auto i = 0; i < projections.size(); ++i) {
-    names.push_back(queryContext.nextColumnName("_p"));
-  }
   return std::make_shared<ProjectNode>(
       queryContext.nextNodeId(),
       std::move(names),
@@ -358,11 +358,12 @@ PlanNodePtr toVeloxPlan(
 
       if (auto field =
               std::dynamic_pointer_cast<const FieldAccessTypedExpr>(input)) {
-        projectNames.push_back(field->name());
+        projectNames.push_back(queryContext.nextColumnName(field->name()));
         fieldInputs.push_back(field);
       } else {
         identityProjection = false;
-        projectNames.push_back(queryContext.nextColumnName("_p"));
+        //std::cerr << "logicalAggregate111: " << expression->GetName() << std::endl;
+        projectNames.push_back(queryContext.nextColumnName(expression->GetName()));
         fieldInputs.push_back(std::make_shared<FieldAccessTypedExpr>(
             input->type(), projectNames.back()));
       }
@@ -391,7 +392,8 @@ PlanNodePtr toVeloxPlan(
       groupingKeys.push_back(field);
     } else {
       identityProjection = false;
-      projectNames.push_back(queryContext.nextColumnName("_p"));
+      //std::cerr << "logicalAggregate222: " << expression->GetName() << std::endl;
+      projectNames.push_back(queryContext.nextColumnName(expression->GetName()));
       groupingKeys.push_back(std::make_shared<FieldAccessTypedExpr>(
           groupingExpr->type(), projectNames.back()));
     }
@@ -409,7 +411,7 @@ PlanNodePtr toVeloxPlan(
 
   std::vector<std::string> names;
   for (auto i = 0; i < aggregates.size(); ++i) {
-    names.push_back(queryContext.nextColumnName("_a"));
+    names.push_back(queryContext.nextColumnName(aggregates[i].call->name()));
   }
 
   return std::make_shared<AggregationNode>(
@@ -675,8 +677,8 @@ PlanNodePtr DuckDbQueryPlanner::plan(const std::string& sql) {
   conn_.Query("PRAGMA disable_optimizer");
 
   auto plan = conn_.ExtractPlan(sql);
-
-  QueryContext queryContext{tables_, tableScans_};
+  PlanNodeIdGenerator planNodeIdGenerator;
+  QueryContext queryContext{tables_, tableScans_, &planNodeIdGenerator};
   return toVeloxPlan(*plan, pool_, queryContext);
 }
 
@@ -705,8 +707,10 @@ std::vector<std::string> DuckDbQueryPlanner::extractTableNames(const std::string
     return table_names;
 }
 
-PlanNodePtr DuckDbQueryPlanner::duckPlanConvertVeloxPlan(const std::unique_ptr<::duckdb::LogicalOperator>& duckdb_plan) {
-  QueryContext queryContext{tables_, tableScans_};
+PlanNodePtr DuckDbQueryPlanner::duckPlanConvertVeloxPlan(
+    const std::unique_ptr<::duckdb::LogicalOperator>& duckdb_plan,
+    PlanNodeIdGenerator* planNodeIdGenerator) {
+  QueryContext queryContext{tables_, tableScans_, planNodeIdGenerator};
   return toVeloxPlan(*duckdb_plan, pool_, queryContext);
 }
 } // namespace facebook::velox::core

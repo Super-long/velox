@@ -66,6 +66,7 @@ class QueryPlannerTest : public testing::Test,
       const std::string& expectedPlan) {
     SCOPED_TRACE(sql);
     auto plan = parseQuery(sql, pool_.get(), inMemoryTables);
+    std::cerr << plan->toString(true, true) << std::endl;
     ASSERT_EQ(expectedPlan, plan->toString(false, true));
   }
 
@@ -233,7 +234,7 @@ TEST_F(QueryPlannerTest, inStorageTable) {
     },
   };
 
-  auto sql = "SELECT a, min(b), sum(b), sum(d), max(d) FROM t WHERE c > 5 GROUP BY 1";
+  auto sql = "SELECT a, min(b) as min_b , sum(b) as sum_b, sum(d) as sum_d, sum(d) as sum_d, sum(d) as sum_d FROM t WHERE c > 5 GROUP BY 1";
   // auto plan = parseQuery(sql, pool_.get(), inStorageTables);
 
   DuckDbQueryPlanner planner(pool_.get());
@@ -250,9 +251,11 @@ TEST_F(QueryPlannerTest, inStorageTable) {
   auto duckPlan = planner.duckPlan(sql);
   std::cerr << duckPlan->ToString() << std::endl;
 
-  auto plan = planner.duckPlanConvertVeloxPlan(duckPlan);
-  
-  
+  PlanNodeIdGenerator planNodeIdGenerator;
+  auto plan = planner.duckPlanConvertVeloxPlan(duckPlan, &planNodeIdGenerator);
+
+  std::cerr << plan->toString(true, true) << std::endl;
+
   // step3: 构造split
   auto connectorSplit = std::make_shared<connector::hive::HiveConnectorSplit>(
       kHiveConnectorId,
@@ -332,7 +335,8 @@ TEST_F(QueryPlannerTest, customAggregateFunctions) {
 
   std::cerr << duckdbPlan->ToString() << std::endl;
 
-  auto plan = planner.duckPlanConvertVeloxPlan(duckdbPlan);
+  PlanNodeIdGenerator planNodeIdGenerator;
+  auto plan = planner.duckPlanConvertVeloxPlan(duckdbPlan, &planNodeIdGenerator);
 
   ASSERT_EQ(
       plan->toString(false, true),
