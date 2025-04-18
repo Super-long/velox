@@ -267,6 +267,21 @@ struct Timestamp {
     return Timestamp(second, nano);
   }
 
+  static Timestamp fromNanosNoError(int64_t nanos)
+#if defined(__has_feature)
+#if __has_feature(__address_sanitizer__)
+      __attribute__((__no_sanitize__("signed-integer-overflow")))
+#endif
+#endif
+  {
+    if (nanos >= 0 || nanos % 1'000'000'000 == 0) {
+      return Timestamp(nanos / 1'000'000'000, nanos % 1'000'000'000);
+    }
+    auto second = nanos / 1'000'000'000 - 1;
+    auto nano = (nanos - second * 1'000'000'000) % 1'000'000'000;
+    return Timestamp(second, nano);
+  }
+
   static const Timestamp minMillis() {
     // The minimum Timestamp that toMillis() method will not overflow.
     // Used to calculate the minimum value of the Presto timestamp.

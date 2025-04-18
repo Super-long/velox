@@ -30,6 +30,11 @@
 #include <duckdb/planner/expression/bound_constant_expression.hpp> // @manual
 #include <duckdb/planner/expression/bound_function_expression.hpp> // @manual
 #include <duckdb/planner/expression/bound_reference_expression.hpp> // @manual
+#include <duckdb/planner/expression/bound_conjunction_expression.hpp> // @manual
+#include <duckdb/planner/expression/bound_operator_expression.hpp> // @manual
+#include <duckdb/planner/operator/logical_order.hpp> // @manual
+#include <duckdb/planner/operator/logical_distinct.hpp> // @manual
+#include <duckdb/planner/operator/logical_limit.hpp> // @manual
 #include <duckdb/parser/query_node/select_node.hpp> // @manual
 #include <duckdb/parser/tableref/basetableref.hpp> // @manual
 
@@ -89,6 +94,8 @@ std::string mapScalarFunctionName(const std::string& name) {
       {"*", "multiply"},
       {"/", "divide"},
       {"%", "mod"},
+      {"~~", "like"},
+      {"!~~", "not_like"},
       {"list_value", "array_constructor"},
   };
 
@@ -248,10 +255,84 @@ TypedExprPtr toVeloxExpression(
           duckdb::toVeloxType(constant->return_type),
           duckdb::duckValueToVariant(constant->value));
     }
+    // comparison
     case ::duckdb::ExpressionType::COMPARE_EQUAL:
       return toVeloxComparisonExpression("eq", expression, inputType);
     case ::duckdb::ExpressionType::COMPARE_GREATERTHAN:
       return toVeloxComparisonExpression("gt", expression, inputType);
+    case ::duckdb::ExpressionType::COMPARE_LESSTHAN:
+      return toVeloxComparisonExpression("lt", expression, inputType);
+    case ::duckdb::ExpressionType::COMPARE_LESSTHANOREQUALTO:
+      return toVeloxComparisonExpression("lte", expression, inputType);
+    case ::duckdb::ExpressionType::COMPARE_GREATERTHANOREQUALTO:
+      return toVeloxComparisonExpression("gte", expression, inputType);
+    case ::duckdb::ExpressionType::COMPARE_NOTEQUAL:
+      return toVeloxComparisonExpression("neq", expression, inputType);
+
+    // AND
+    case ::duckdb::ExpressionType::CONJUNCTION_AND: {
+      auto* conjunction = dynamic_cast<::duckdb::BoundConjunctionExpression*>(&expression);
+      std::vector<TypedExprPtr> children;
+      for (auto& child : conjunction->children) {
+        children.push_back(toVeloxExpression(*child, inputType));
+      }
+      return std::make_shared<CallTypedExpr>(BOOLEAN(), std::move(children), "and");
+    }
+    // OR
+    case ::duckdb::ExpressionType::CONJUNCTION_OR: {
+      auto* conjunction = dynamic_cast<::duckdb::BoundConjunctionExpression*>(&expression);
+      std::vector<TypedExprPtr> children;
+      for (auto& child : conjunction->children) {
+        children.push_back(toVeloxExpression(*child, inputType));
+      }
+      return std::make_shared<CallTypedExpr>(BOOLEAN(), std::move(children), "or");
+    }
+    // IS NULL 
+    case ::duckdb::ExpressionType::OPERATOR_IS_NULL: {
+      auto* isNull = dynamic_cast<::duckdb::BoundOperatorExpression*>(&expression);
+      std::vector<TypedExprPtr> children;
+      children.push_back(toVeloxExpression(*isNull->children[0], inputType));
+      return std::make_shared<CallTypedExpr>(BOOLEAN(), std::move(children), "is_null");
+    }
+    // IS NOT NULL
+    case ::duckdb::ExpressionType::OPERATOR_IS_NOT_NULL: {
+      auto* isNotNull = dynamic_cast<::duckdb::BoundOperatorExpression*>(&expression);
+      std::vector<TypedExprPtr> innerChildren;
+      innerChildren.push_back(toVeloxExpression(*isNotNull->children[0], inputType));
+       
+      // is null
+      auto isNullExpr = std::make_shared<CallTypedExpr>(BOOLEAN(), std::move(innerChildren), "is_null");
+       
+      // not is null
+      std::vector<TypedExprPtr> notChildren;
+      notChildren.push_back(std::move(isNullExpr));
+      return std::make_shared<CallTypedExpr>(BOOLEAN(), std::move(notChildren), "not");
+    }
+    // IN
+    case ::duckdb::ExpressionType::COMPARE_IN: {
+      auto* inExpr = dynamic_cast<::duckdb::BoundOperatorExpression*>(&expression);
+      std::vector<TypedExprPtr> children;
+      for (auto& child : inExpr->children) {
+        children.push_back(toVeloxExpression(*child, inputType));
+      }
+      return std::make_shared<CallTypedExpr>(BOOLEAN(), std::move(children), "in");
+    }
+    // NOT IN
+    case ::duckdb::ExpressionType::COMPARE_NOT_IN: {
+      auto* notInExpr = dynamic_cast<::duckdb::BoundOperatorExpression*>(&expression);
+      std::vector<TypedExprPtr> children;
+      for (auto& child : notInExpr->children) {
+        children.push_back(toVeloxExpression(*child, inputType));
+      }
+      // in
+      auto inExpr = std::make_shared<CallTypedExpr>(BOOLEAN(), std::move(children), "in");
+      // not
+      std::vector<TypedExprPtr> notChildren;
+      notChildren.push_back(std::move(inExpr));
+      return std::make_shared<CallTypedExpr>(BOOLEAN(), std::move(notChildren), "not");
+      
+    }
+
     case ::duckdb::ExpressionType::OPERATOR_CAST: {
       auto* cast = dynamic_cast<::duckdb::BoundCastExpression*>(&expression);
       return std::make_shared<CastTypedExpr>(
@@ -260,9 +341,54 @@ TypedExprPtr toVeloxExpression(
           cast->try_cast);
     }
     case ::duckdb::ExpressionType::BOUND_FUNCTION: {
-      auto* func =
-          dynamic_cast<::duckdb::BoundFunctionExpression*>(&expression);
-
+      auto* func = dynamic_cast<::duckdb::BoundFunctionExpression*>(&expression);
+      // LIKE
+      if (func->function.name == "~~" || func->function.name == "LIKE" ||
+        func->function.name == "~~~" || func->function.name == "glob") {
+        std::vector<TypedExprPtr> children;
+        for (auto& child : func->children) {
+          auto expr = toVeloxExpression(*child, inputType);
+          if (expr->type()->kind() != TypeKind::VARCHAR) {
+            children.push_back(std::make_shared<CastTypedExpr>(
+                VARCHAR(), std::vector<TypedExprPtr>{expr}, false));
+          } else {
+            children.push_back(expr);
+          }
+        }
+        return std::make_shared<CallTypedExpr>(BOOLEAN(), std::move(children), "like");
+      } else if (func->function.name == "~~*" || func->function.name == "ILIKE") {
+        std::vector<TypedExprPtr> children;
+        for (auto& child : func->children) {
+          auto expr = toVeloxExpression(*child, inputType);
+          if (expr->type()->kind() != TypeKind::VARCHAR) {
+            expr = std::make_shared<CastTypedExpr>(
+                VARCHAR(), std::vector<TypedExprPtr>{expr}, false);
+          }
+          
+          if (children.empty()) {
+            std::vector<TypedExprPtr> lowerArgs{expr};
+            children.push_back(std::make_shared<CallTypedExpr>(VARCHAR(), std::move(lowerArgs), "lower"));
+          } else {
+            std::vector<TypedExprPtr> lowerArgs{expr};
+            children.push_back(std::make_shared<CallTypedExpr>(VARCHAR(), std::move(lowerArgs), "lower"));
+          }
+        }
+        return std::make_shared<CallTypedExpr>(BOOLEAN(), std::move(children), "like");
+      } else if (func->function.name == "~" || func->function.name == "regexp_full_match") {
+        std::vector<TypedExprPtr> children;
+        for (auto& child : func->children) {
+          auto expr = toVeloxExpression(*child, inputType);
+          if (expr->type()->kind() != TypeKind::VARCHAR) {
+            children.push_back(std::make_shared<CastTypedExpr>(
+                VARCHAR(), std::vector<TypedExprPtr>{expr}, false));
+          } else {
+            children.push_back(expr);
+          }
+        }
+        return std::make_shared<CallTypedExpr>(BOOLEAN(), std::move(children), "regexp_like");
+      } 
+      
+      // Regular function handling
       std::vector<TypedExprPtr> children;
       for (auto& child : func->children) {
         children.push_back(toVeloxExpression(*child, inputType));
@@ -273,6 +399,7 @@ TypedExprPtr toVeloxExpression(
           std::move(children),
           mapScalarFunctionName(func->function.name));
     }
+    
     case ::duckdb::ExpressionType::BOUND_REF: {
       auto* ref =
           dynamic_cast<::duckdb::BoundReferenceExpression*>(&expression);
@@ -295,6 +422,7 @@ TypedExprPtr toVeloxExpression(
           std::move(children),
           mapAggregateFunctionName(agg->function.name));
     }
+    
     default:
       VELOX_NYI(
           "Expression type {} is not supported yet: {}",
@@ -308,11 +436,30 @@ PlanNodePtr toVeloxPlan(
     memory::MemoryPool* pool,
     std::vector<PlanNodePtr> sources,
     QueryContext& queryContext) {
-  VELOX_CHECK_EQ(1, logicalFilter.expressions.size());
-  auto filter = toVeloxExpression(
-      *logicalFilter.expressions.front(), sources[0]->outputType());
-  return std::make_shared<FilterNode>(
-      queryContext.nextNodeId(), std::move(filter), std::move(sources[0]));
+  if (logicalFilter.expressions.empty()) {
+    // no expr
+    return sources[0];
+  } else if (logicalFilter.expressions.size() == 1) {
+    auto filter = toVeloxExpression(
+        *logicalFilter.expressions.front(), sources[0]->outputType());
+    return std::make_shared<FilterNode>(
+        queryContext.nextNodeId(), std::move(filter), std::move(sources[0]));
+  } else {
+    // multi-expr and concat
+    std::vector<TypedExprPtr> conditions;
+    for (auto& expr : logicalFilter.expressions) {
+      conditions.push_back(toVeloxExpression(*expr, sources[0]->outputType()));
+    }
+    
+    TypedExprPtr combinedFilter = conditions[0];
+    for (size_t i = 1; i < conditions.size(); i++) {
+      std::vector<TypedExprPtr> andArgs{combinedFilter, conditions[i]};
+      combinedFilter = std::make_shared<CallTypedExpr>(BOOLEAN(), std::move(andArgs), "and");
+    }
+    
+    return std::make_shared<FilterNode>(
+        queryContext.nextNodeId(), std::move(combinedFilter), std::move(sources[0]));
+  }
 }
 
 PlanNodePtr toVeloxPlan(
@@ -320,19 +467,22 @@ PlanNodePtr toVeloxPlan(
     memory::MemoryPool* pool,
     std::vector<PlanNodePtr> sources,
     QueryContext& queryContext) {
-  std::vector<TypedExprPtr> projections;
-  std::vector<std::string> names;
-  for (auto& expression : logicalProjection.expressions) {
-    names.push_back(queryContext.nextColumnName(expression->GetName()));
-    projections.push_back(
-        toVeloxExpression(*expression, sources[0]->outputType()));
-  }
+    std::vector<TypedExprPtr> projections;
+    std::vector<std::string> names;
+    for (auto& expression : logicalProjection.expressions) {
+      names.push_back(queryContext.nextColumnName(expression->GetName()));
+      projections.push_back(
+          toVeloxExpression(*expression, sources[0]->outputType()));
+    }
+  
+    // TODO Figure out how to use these.
+    auto columnBindings = logicalProjection.GetColumnBindings();
 
-  return std::make_shared<ProjectNode>(
-      queryContext.nextNodeId(),
-      std::move(names),
-      std::move(projections),
-      std::move(sources[0]));
+    return std::make_shared<ProjectNode>(
+        queryContext.nextNodeId(),
+        std::move(names),
+        std::move(projections),
+        std::move(sources[0]));
 }
 
 PlanNodePtr toVeloxPlan(
@@ -358,7 +508,7 @@ PlanNodePtr toVeloxPlan(
 
       if (auto field =
               std::dynamic_pointer_cast<const FieldAccessTypedExpr>(input)) {
-        projectNames.push_back(queryContext.nextColumnName(field->name()));
+        projectNames.push_back(field->name());
         fieldInputs.push_back(field);
       } else {
         identityProjection = false;
@@ -454,6 +604,82 @@ PlanNodePtr toVeloxPlan(
 }
 
 PlanNodePtr toVeloxPlan(
+  ::duckdb::LogicalOrder& logicalOrder,
+  memory::MemoryPool* pool,
+  std::vector<PlanNodePtr> sources,
+  QueryContext& queryContext) {
+  VELOX_CHECK_EQ(1, sources.size());
+
+  std::vector<FieldAccessTypedExprPtr> sortingKeys;
+  std::vector<SortOrder> sortingOrders;
+  for (auto i = 0; i < logicalOrder.orders.size(); i++) {
+    auto& expression = logicalOrder.orders[i].expression;
+    
+    auto expr = toVeloxExpression(*expression, sources[0]->outputType());
+    auto constFieldExpr = std::dynamic_pointer_cast<const FieldAccessTypedExpr>(expr);
+    
+    // duckdb will change complex expression to new column, constFieldExpr is not null in most cases.
+    if (!constFieldExpr) {
+      std::vector<TypedExprPtr> projections = {expr};
+      std::vector<std::string> names = {queryContext.nextColumnName(expression->GetName())};
+      
+      auto projectNode = std::make_shared<ProjectNode>(
+          queryContext.nextNodeId(),
+          std::move(names),
+          std::move(projections),
+          std::move(sources[0]));
+      
+      sources = {projectNode};
+      constFieldExpr = std::make_shared<const FieldAccessTypedExpr>(
+          expr->type(), names[0]);
+    }
+    
+    sortingKeys.push_back(constFieldExpr);
+    
+    bool ascending = true;
+    bool nullsFirst = false;
+    ascending = logicalOrder.orders[i].type == ::duckdb::OrderType::ASCENDING ||
+      logicalOrder.orders[i].type == ::duckdb::OrderType::ORDER_DEFAULT;
+    nullsFirst = logicalOrder.orders[i].null_order == ::duckdb::OrderByNullType::NULLS_FIRST ||
+      logicalOrder.orders[i].null_order == ::duckdb::OrderByNullType::ORDER_DEFAULT;
+    sortingOrders.push_back(SortOrder(ascending, nullsFirst));
+  }
+  
+  return std::make_shared<OrderByNode>(
+      queryContext.nextNodeId(),
+      sortingKeys,
+      sortingOrders,
+      false, // isPartial
+      std::move(sources[0]));
+}
+
+PlanNodePtr toVeloxPlan(
+  ::duckdb::LogicalDistinct& logicalDistinct,
+  memory::MemoryPool* pool,
+  std::vector<PlanNodePtr> sources,
+  QueryContext& queryContext) {
+  VELOX_CHECK_EQ(1, sources.size());
+
+  const auto& inputType = sources[0]->outputType()->asRow();
+
+  std::vector<FieldAccessTypedExprPtr> groupingKeys;
+  for (auto i = 0; i < inputType.size(); ++i) {
+    groupingKeys.push_back(std::make_shared<FieldAccessTypedExpr>(
+        inputType.childAt(i), inputType.nameOf(i)));
+  }
+
+  return std::make_shared<AggregationNode>(
+      queryContext.nextNodeId(),
+      AggregationNode::Step::kSingle,
+      groupingKeys,
+      std::vector<FieldAccessTypedExprPtr>{}, // preGroupedKeys
+      std::vector<std::string>{}, // aggregateNames
+      std::vector<AggregationNode::Aggregate>{}, // aggregates 
+      false, // ignoreNullKeys
+      std::move(sources[0]));
+}
+
+PlanNodePtr toVeloxPlan(
     ::duckdb::LogicalOperator& plan,
     memory::MemoryPool* pool,
     QueryContext& queryContext) {
@@ -496,6 +722,27 @@ PlanNodePtr toVeloxPlan(
           pool,
           std::move(sources),
           queryContext);
+    case ::duckdb::LogicalOperatorType::LOGICAL_ORDER_BY:
+      return toVeloxPlan(
+        dynamic_cast<::duckdb::LogicalOrder&>(plan),
+        pool,
+        std::move(sources),
+        queryContext);
+    case ::duckdb::LogicalOperatorType::LOGICAL_DISTINCT:
+      return toVeloxPlan(
+        dynamic_cast<::duckdb::LogicalDistinct&>(plan),
+        pool,
+        std::move(sources),
+        queryContext);
+    case ::duckdb::LogicalOperatorType::LOGICAL_LIMIT: {
+        auto& limit = dynamic_cast<const ::duckdb::LogicalLimit&>(plan);
+        return std::make_shared<core::LimitNode>(
+            queryContext.nextNodeId(),
+            limit.offset_val,
+            limit.limit_val,
+            false,
+            sources[0]);
+    }
     default:
       VELOX_NYI(
           "Plan node is not supported yet: {}",

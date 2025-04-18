@@ -305,7 +305,7 @@ TEST_F(QueryPlannerTest, extractTableNames) {
       std::cerr << "table: " << name << std::endl;
     }
   }
-  ASSERT_EQ(true, false);
+  // ASSERT_EQ(true, false);
 }
 
 TEST_F(QueryPlannerTest, customScalarFunctions) {
@@ -315,6 +315,15 @@ TEST_F(QueryPlannerTest, customScalarFunctions) {
 
   auto plan =
       planner.plan("SELECT foo(x), bar([x]) FROM UNNEST([1, 2, 3]) as t(x)");
+  ASSERT_EQ(
+      plan->toString(false, true),
+      "-- Project[3]\n"
+      "  -- Unnest[2]\n"
+      "    -- Project[1]\n"
+      "      -- Values[0]\n");
+  
+  // 验证time_bucket、from_nanoseconds
+  plan = planner.plan("SELECT time_bucket('1 s', from_nanoseconds(x)) FROM UNNEST([1, 2, 3]) as t(x)");
   ASSERT_EQ(
       plan->toString(false, true),
       "-- Project[3]\n"
@@ -360,6 +369,254 @@ TEST_F(QueryPlannerTest, error) {
       "SELECT x % 5, my_agg(x) FROM UNNEST([1, 2, 3]) as t(x) GROUP BY 1",
       "Scalar Function with name my_agg does not exist");
   assertPlanError("SELECT 'test ", "unterminated quoted string");
+}
+
+
+TEST_F(QueryPlannerTest, logicalOperators) {
+  // 测试AND和OR逻辑运算符
+  assertPlan(
+      "SELECT x FROM UNNEST([1, 2, 3, 4, 5]) as t(x) WHERE x > 2 AND x < 5",
+      "-- Project[4]\n"
+      "  -- Filter[3]\n"
+      "    -- Unnest[2]\n"
+      "      -- Project[1]\n"
+      "        -- Values[0]\n");
+
+  assertPlan(
+      "SELECT x FROM UNNEST([1, 2, 3, 4, 5]) as t(x) WHERE x < 2 OR x > 4",
+      "-- Project[4]\n"
+      "  -- Filter[3]\n"
+      "    -- Unnest[2]\n"
+      "      -- Project[1]\n"
+      "        -- Values[0]\n");
+
+  // 测试复杂的逻辑表达式
+  assertPlan(
+      "SELECT x FROM UNNEST([1, 2, 3, 4, 5]) as t(x) WHERE (x > 1 AND x < 4) OR x = 5",
+      "-- Project[4]\n"
+      "  -- Filter[3]\n"
+      "    -- Unnest[2]\n"
+      "      -- Project[1]\n"
+      "        -- Values[0]\n");
+}
+
+TEST_F(QueryPlannerTest, comparisonOperators) {
+  // 测试各种比较运算符
+  std::vector<std::string> operators = {"=", "<>", ">", "<", ">=", "<="};
+  
+  for (const auto& op : operators) {
+    std::string sql = fmt::format(
+        "SELECT x FROM UNNEST([1, 2, 3, 4, 5]) as t(x) WHERE x {} 3", op);
+    
+    assertPlan(
+        sql,
+        "-- Project[4]\n"
+        "  -- Filter[3]\n"
+        "    -- Unnest[2]\n"
+        "      -- Project[1]\n"
+        "        -- Values[0]\n");
+  }
+}
+
+TEST_F(QueryPlannerTest, likeOperator) {
+  // 测试LIKE运算符
+  assertPlan(
+      "SELECT s FROM UNNEST(['apple', 'banana', 'cherry']) as t(s) WHERE s LIKE 'a%'",
+      "-- Project[4]\n"
+      "  -- Filter[3]\n"
+      "    -- Unnest[2]\n"
+      "      -- Project[1]\n"
+      "        -- Values[0]\n");
+  
+  // 测试ILIKE运算符（不区分大小写）
+  assertPlan(
+      "SELECT s FROM UNNEST(['apple', 'banana', 'cherry']) as t(s) WHERE s ILIKE 'a%'",
+      "-- Project[4]\n"
+      "  -- Filter[3]\n"
+      "    -- Unnest[2]\n"
+      "      -- Project[1]\n"
+      "        -- Values[0]\n");
+}
+
+TEST_F(QueryPlannerTest, regexOperator) {
+  // 测试正则表达式匹配
+  assertPlan(
+      "SELECT s FROM UNNEST(['apple', 'banana', 'cherry']) as t(s) WHERE s ~ '^a.*'",
+      "-- Project[4]\n"
+      "  -- Filter[3]\n"
+      "    -- Unnest[2]\n"
+      "      -- Project[1]\n"
+      "        -- Values[0]\n");
+  
+  // 测试regexp_full_match函数
+  assertPlan(
+      "SELECT s FROM UNNEST(['apple', 'banana', 'cherry']) as t(s) WHERE regexp_full_match(s, '^a.*')",
+      "-- Project[4]\n"
+      "  -- Filter[3]\n"
+      "    -- Unnest[2]\n"
+      "      -- Project[1]\n"
+      "        -- Values[0]\n");
+}
+
+TEST_F(QueryPlannerTest, inOperator) {
+  // 测试IN运算符
+  assertPlan(
+      "SELECT x FROM UNNEST([1, 2, 3, 4, 5]) as t(x) WHERE x IN (1, 3, 5)",
+      "-- Project[4]\n"
+      "  -- Filter[3]\n"
+      "    -- Unnest[2]\n"
+      "      -- Project[1]\n"
+      "        -- Values[0]\n");
+  
+  // 测试NOT IN
+  assertPlan(
+      "SELECT x FROM UNNEST([1, 2, 3, 4, 5]) as t(x) WHERE x NOT IN(2, 4)",
+      "-- Project[4]\n"
+      "  -- Filter[3]\n"
+      "    -- Unnest[2]\n"
+      "      -- Project[1]\n"
+      "        -- Values[0]\n");
+}
+
+TEST_F(QueryPlannerTest, nullOperators) {
+  // 测试IS NULL
+  assertPlan(
+      "SELECT x FROM UNNEST([1, 2, NULL, 4, 5]) as t(x) WHERE x IS NULL",
+      "-- Project[4]\n"
+      "  -- Filter[3]\n"
+      "    -- Unnest[2]\n"
+      "      -- Project[1]\n"
+      "        -- Values[0]\n");
+  
+  // 测试IS NOT NULL
+  assertPlan(
+      "SELECT x FROM UNNEST([1, 2, NULL, 4, 5]) as t(x) WHERE x IS NOT NULL",
+      "-- Project[4]\n"
+      "  -- Filter[3]\n"
+      "    -- Unnest[2]\n"
+      "      -- Project[1]\n"
+      "        -- Values[0]\n");
+}
+
+TEST_F(QueryPlannerTest, complexFilters) {
+  // 测试复杂的过滤条件组合
+  std::unordered_map<std::string, std::vector<RowVectorPtr>> inMemoryTables = {
+      {"t",
+       {makeEmptyRowVector(
+           ROW({"a", "b", "c"}, {BIGINT(), VARCHAR(), DOUBLE()}))}},
+  };
+
+  // 组合多种过滤条件
+  assertPlan(
+      "SELECT a, b FROM t WHERE a > 10 AND b LIKE 'test%' AND c IS NOT NULL",
+      inMemoryTables,
+      "-- Project[2]\n"
+      "  -- Filter[1]\n"
+      "    -- Values[0]\n");
+  
+  // 测试OR和AND的组合
+  assertPlan(
+      "SELECT a, b FROM t WHERE (a > 10 AND b LIKE 'test%') OR (c > 5.0 AND b IN ('x', 'y', 'z'))",
+      inMemoryTables,
+      "-- Project[2]\n"
+      "  -- Filter[1]\n"
+      "    -- Values[0]\n");
+}
+
+TEST_F(QueryPlannerTest, orderBy) {
+  // 测试ORDER BY
+  assertPlan(
+      "SELECT x FROM UNNEST([3, 1, 5, 2, 4]) as t(x) ORDER BY x",
+      "-- OrderBy[4]\n"
+      "  -- Project[3]\n"
+      "    -- Unnest[2]\n"
+      "      -- Project[1]\n"
+      "        -- Values[0]\n");
+  
+  // 测试多列排序
+  assertPlan(
+      "SELECT x, x % 3 as y FROM UNNEST([3, 1, 5, 2, 4]) as t(x) ORDER BY y, x DESC",
+      "-- OrderBy[4]\n"
+      "  -- Project[3]\n"
+      "    -- Unnest[2]\n"
+      "      -- Project[1]\n"
+      "        -- Values[0]\n");
+  
+  // 测试带表达式的排序 （x%2) project
+  assertPlan(
+      "SELECT x FROM UNNEST([3, 1, 5, 2, 4]) as t(x) ORDER BY x % 2, ABS(x - 3)",
+      "-- Project[5]\n"
+      "  -- OrderBy[4]\n"
+      "    -- Project[3]\n"
+      "      -- Unnest[2]\n"
+      "        -- Project[1]\n"
+      "          -- Values[0]\n");
+}
+
+TEST_F(QueryPlannerTest, distinct) {
+  // 测试DISTINCT
+  assertPlan(
+      "SELECT DISTINCT x % 2 FROM UNNEST([1, 2, 3, 4, 5]) as t(x)",
+      "-- Aggregation[4]\n"
+      "  -- Project[3]\n"
+      "    -- Unnest[2]\n"
+      "      -- Project[1]\n"
+      "        -- Values[0]\n");
+  
+  // 测试多列DISTINCT
+  assertPlan(
+      "SELECT DISTINCT x % 2, x > 3 FROM UNNEST([1, 2, 3, 4, 5]) as t(x)",
+      "-- Aggregation[4]\n"
+      "  -- Project[3]\n"
+      "    -- Unnest[2]\n"
+      "      -- Project[1]\n"
+      "        -- Values[0]\n");
+}
+
+TEST_F(QueryPlannerTest, limit) {
+  // 测试LIMIT
+  assertPlan(
+      "SELECT x FROM UNNEST([1, 2, 3, 4, 5]) as t(x) LIMIT 3",
+      "-- Limit[4]\n"
+      "  -- Project[3]\n"
+      "    -- Unnest[2]\n"
+      "      -- Project[1]\n"
+      "        -- Values[0]\n");
+  
+  // 测试LIMIT与OFFSET
+  assertPlan(
+      "SELECT x FROM UNNEST([1, 2, 3, 4, 5]) as t(x) LIMIT 3 OFFSET 2",
+      "-- Limit[4]\n"
+      "  -- Project[3]\n"
+      "    -- Unnest[2]\n"
+      "      -- Project[1]\n"
+      "        -- Values[0]\n");
+  
+  // 测试LIMIT与ORDER BY组合
+  assertPlan(
+      "SELECT x FROM UNNEST([3, 1, 5, 2, 4]) as t(x) ORDER BY x LIMIT 3",
+      "-- Limit[5]\n"
+      "  -- OrderBy[4]\n"
+      "    -- Project[3]\n"
+      "      -- Unnest[2]\n"
+      "        -- Project[1]\n"
+      "          -- Values[0]\n");
+}
+
+TEST_F(QueryPlannerTest, complexQueries) {
+  // 测试组合多种操作的复杂查询
+  assertPlan(
+      "SELECT DISTINCT x % 3 as mod FROM UNNEST([1, 2, 3, 4, 5, 6, 7, 8, 9]) as t(x) WHERE x > 2 ORDER BY mod LIMIT 2",
+      "-- Limit[7]\n"
+      "  -- OrderBy[6]\n"
+      "    -- Aggregation[5]\n"
+      "      -- Project[4]\n"
+      "        -- Filter[3]\n"
+      "          -- Unnest[2]\n"
+      "            -- Project[1]\n"
+      "              -- Values[0]\n");
+  // JOIN
+  
 }
 
 } // namespace facebook::velox::core::test
