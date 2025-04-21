@@ -533,7 +533,9 @@ class S3FileSystem::Impl {
     hiveConfig_ = std::make_shared<HiveConfig>(
         std::make_shared<config::ConfigBase>(config->rawConfigsCopy()));
     VELOX_CHECK(getAwsInstance()->isInitialized(), "S3 is not initialized");
-    Aws::Client::ClientConfiguration clientConfig;
+    Aws::Client::ClientConfigurationInitValues initValues;
+    initValues.shouldDisableIMDS = true;
+    Aws::Client::ClientConfiguration clientConfig(initValues);
     clientConfig.endpointOverride = hiveConfig_->s3Endpoint();
     clientConfig.region = hiveConfig_->s3Region();
 
