@@ -163,6 +163,7 @@ std::unique_ptr<common::Filter> makeLessThanOrEqualFilter(
     case TypeKind::REAL:
       return lessThanOrEqualFloat(singleValue<float>(upper));
     case TypeKind::VARCHAR:
+    case TypeKind::VARBINARY:
       return lessThanOrEqual(singleValue<StringView>(upper));
     case TypeKind::TIMESTAMP:
       return lessThanOrEqual(singleValue<Timestamp>(upper));
@@ -193,6 +194,7 @@ std::unique_ptr<common::Filter> makeLessThanFilter(
       return lessThanDouble(singleValue<double>(upper));
     case TypeKind::REAL:
       return lessThanFloat(singleValue<float>(upper));
+    case TypeKind::VARBINARY:
     case TypeKind::VARCHAR:
       return lessThan(singleValue<StringView>(upper));
     case TypeKind::TIMESTAMP:
@@ -225,6 +227,7 @@ std::unique_ptr<common::Filter> makeGreaterThanOrEqualFilter(
     case TypeKind::REAL:
       return greaterThanOrEqualFloat(singleValue<float>(lower));
     case TypeKind::VARCHAR:
+    case TypeKind::VARBINARY:
       return greaterThanOrEqual(singleValue<StringView>(lower));
     case TypeKind::TIMESTAMP:
       return greaterThanOrEqual(singleValue<Timestamp>(lower));
@@ -256,6 +259,7 @@ std::unique_ptr<common::Filter> makeGreaterThanFilter(
     case TypeKind::REAL:
       return greaterThanFloat(singleValue<float>(lower));
     case TypeKind::VARCHAR:
+    case TypeKind::VARBINARY:
       return greaterThan(singleValue<StringView>(lower));
     case TypeKind::TIMESTAMP:
       return greaterThan(singleValue<Timestamp>(lower));
@@ -285,9 +289,14 @@ std::unique_ptr<common::Filter> makeEqualFilter(
     case TypeKind::HUGEINT:
       return equalHugeint(singleValue<int128_t>(value));
     case TypeKind::VARCHAR:
+    case TypeKind::VARBINARY:
       return equal(singleValue<StringView>(value));
     case TypeKind::TIMESTAMP:
       return equal(singleValue<Timestamp>(value));
+    case TypeKind::DOUBLE:
+      return equalDouble(singleValue<double>(value));
+    case TypeKind::REAL:
+      return equalFloat(singleValue<float>(value));
     default:
       return nullptr;
   }
@@ -351,53 +360,115 @@ toInt64List(const VectorPtr& vector, vector_size_t start, vector_size_t size) {
   return values;
 }
 
-std::unique_ptr<common::Filter> makeInFilter(
-    const core::TypedExprPtr& expr,
-    core::ExpressionEvaluator* evaluator,
-    bool negated) {
-  auto vector = toConstant(expr, evaluator);
-  if (!(vector && vector->type()->isArray())) {
-    return nullptr;
-  }
-
+void getListFromVector(const VectorPtr &vector, std::vector<int64_t>& values_int,
+  std::vector<std::string>& values_str) {
   auto arrayVector = vector->valueVector()->as<ArrayVector>();
   auto index = vector->as<ConstantVector<ComplexType>>()->index();
   auto offset = arrayVector->offsetAt(index);
   auto size = arrayVector->sizeAt(index);
   auto elements = arrayVector->elements();
-
   auto elementType = arrayVector->type()->asArray().elementType();
+
   switch (elementType->kind()) {
     case TypeKind::TINYINT: {
       auto values = toInt64List<int8_t>(elements, offset, size);
-      return negated ? notIn(values) : in(values);
+      values_int.insert(values_int.end(), values.begin(), values.end());
+      return;
     }
     case TypeKind::SMALLINT: {
       auto values = toInt64List<int16_t>(elements, offset, size);
-      return negated ? notIn(values) : in(values);
+      values_int.insert(values_int.end(), values.begin(), values.end());
+      return;
     }
     case TypeKind::INTEGER: {
       auto values = toInt64List<int32_t>(elements, offset, size);
-      return negated ? notIn(values) : in(values);
+      values_int.insert(values_int.end(), values.begin(), values.end());
+      return;
     }
     case TypeKind::BIGINT: {
       auto values = toInt64List<int64_t>(elements, offset, size);
-      return negated ? notIn(values) : in(values);
+      values_int.insert(values_int.end(), values.begin(), values.end());
+      return;
     }
+    case TypeKind::VARBINARY:
     case TypeKind::VARCHAR: {
       auto stringElements = elements->as<SimpleVector<StringView>>();
-      std::vector<std::string> values;
       for (auto i = 0; i < size; i++) {
-        values.push_back(stringElements->valueAt(offset + i).str());
+        values_str.push_back(stringElements->valueAt(offset + i).str());
       }
-      if (negated) {
-        return notIn(values);
-      }
-      return in(values);
+      return;
     }
     default:
-      return nullptr;
+      VELOX_UNSUPPORTED("Unsupported type for IN predicate: {}", mapTypeKindToName(elementType->kind()));
   }
+}
+
+std::unique_ptr<common::Filter> makeInFilter(
+  const std::vector<core::TypedExprPtr>& exprs,
+  core::ExpressionEvaluator* evaluator,
+  bool negated) {
+
+  if (exprs.empty() || exprs.size() <= 1) {
+    return nullptr;
+  }
+
+  TypeKind kind = TypeKind::INVALID;
+  std::vector<int64_t> values_int;
+  std::vector<std::string> values_str;
+  int size = exprs.size();
+  for (int i = 1; i < size; i++) {
+    const auto& expr = exprs[i];
+    auto vector = toConstant(expr, evaluator);
+    if (i == 1) {
+      kind = vector->typeKind();
+    }
+    if (!vector || vector->typeKind() != kind) {
+      return nullptr;
+    }
+    
+    switch (kind) {
+      case TypeKind::TINYINT: {
+        values_int.push_back(singleValue<int8_t>(vector));
+        break;
+      }
+      case TypeKind::SMALLINT: {
+        values_int.push_back(singleValue<int16_t>(vector));
+        break;
+      }
+      case TypeKind::INTEGER: {
+        values_int.push_back(singleValue<int32_t>(vector));
+        break;
+      }
+      case TypeKind::BIGINT: {
+        values_int.push_back(singleValue<int64_t>(vector));
+        break;
+      }
+      case TypeKind::VARCHAR:
+      case TypeKind::VARBINARY: {
+        values_str.push_back(singleValue<StringView>(vector));
+        break;
+      }
+      case TypeKind::ARRAY: {
+        getListFromVector(vector, values_int, values_str);
+        break;
+      }
+      default:
+        return nullptr;
+    }
+  }
+
+  if (!values_int.empty()) {
+    return negated ? notIn(values_int) : in(values_int);
+  }
+
+  if (!values_str.empty()) {
+    if (negated) { 
+      return notIn(values_str); 
+    } 
+    return in(values_str);
+  }
+    
+  return nullptr;
 }
 
 std::unique_ptr<common::Filter> makeBetweenFilter(
@@ -435,6 +506,7 @@ std::unique_ptr<common::Filter> makeBetweenFilter(
       return negated
           ? nullptr
           : betweenFloat(singleValue<float>(lower), singleValue<float>(upper));
+    case TypeKind::VARBINARY:
     case TypeKind::VARCHAR:
       if (negated) {
         return notBetween(
@@ -503,7 +575,7 @@ std::unique_ptr<common::Filter> leafCallToSubfieldFilter(
     }
   } else if (call.name() == "in") {
     if (toSubfield(leftSide, subfield)) {
-      return makeInFilter(call.inputs()[1], evaluator, negated);
+      return makeInFilter(call.inputs(), evaluator, negated);
     }
   } else if (call.name() == "is_null") {
     if (toSubfield(leftSide, subfield)) {

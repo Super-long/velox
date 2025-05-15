@@ -362,6 +362,20 @@ inline std::unique_ptr<common::HugeintRange> equalHugeint(
   return std::make_unique<common::HugeintRange>(value, value, nullAllowed);
 }
 
+inline std::unique_ptr<common::DoubleRange> equalDouble(
+  double value,
+  bool nullAllowed = false) {
+return std::make_unique<common::DoubleRange>(
+    value, false, false, value, false, false, nullAllowed);
+}
+
+inline std::unique_ptr<common::FloatRange> equalFloat(
+  float value,
+  bool nullAllowed = false) {
+return std::make_unique<common::FloatRange>(
+    value, false, false, value, false, false, nullAllowed);
+}
+
 inline std::unique_ptr<common::HugeintRange>
 betweenHugeint(int128_t min, int128_t max, bool nullAllowed = false) {
   return std::make_unique<common::HugeintRange>(min, max, nullAllowed);

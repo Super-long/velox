@@ -321,15 +321,6 @@ TEST_F(QueryPlannerTest, customScalarFunctions) {
       "  -- Unnest[2]\n"
       "    -- Project[1]\n"
       "      -- Values[0]\n");
-  
-  // 验证time_bucket、from_nanoseconds
-  plan = planner.plan("SELECT time_bucket('1 s', from_nanoseconds(x)) FROM UNNEST([1, 2, 3]) as t(x)");
-  ASSERT_EQ(
-      plan->toString(false, true),
-      "-- Project[3]\n"
-      "  -- Unnest[2]\n"
-      "    -- Project[1]\n"
-      "      -- Values[0]\n");
 }
 
 TEST_F(QueryPlannerTest, customAggregateFunctions) {

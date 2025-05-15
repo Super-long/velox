@@ -83,6 +83,29 @@ TEST_F(ExprToSubfieldFilterTest, eq) {
   ASSERT_EQ(bigintRange->lower(), 42);
   ASSERT_EQ(bigintRange->upper(), 42);
   ASSERT_FALSE(bigintRange->testNull());
+
+  call = parseCallExpr("b = 42.0", ROW({{"b", DOUBLE()}}));
+  Subfield subfield2;
+  filter = leafCallToSubfieldFilter(*call, subfield2, evaluator());
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield2, {"b"});
+  auto doubleRange = dynamic_cast<DoubleRange*>(filter.get());
+  ASSERT_TRUE(doubleRange);
+  ASSERT_EQ(doubleRange->lower(), 42);
+  ASSERT_EQ(doubleRange->upper(), 42);
+  ASSERT_FALSE(doubleRange->testNull());
+  ASSERT_TRUE(doubleRange->testDouble(42));
+
+  call = parseCallExpr("c = cast('1' as VARBINARY)", ROW({{"c", VARBINARY()}}));
+  Subfield subfield3;
+  filter = leafCallToSubfieldFilter(*call, subfield3, evaluator());
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield3, {"c"});
+  auto byteRange = dynamic_cast<BytesValues*>(filter.get());
+  ASSERT_TRUE(byteRange);
+  ASSERT_FALSE(byteRange->testNull());
+  std::string cmp = "1";
+  ASSERT_TRUE(byteRange->testBytes(cmp.c_str(), cmp.size()));
 }
 
 TEST_F(ExprToSubfieldFilterTest, eqExpr) {
@@ -96,6 +119,18 @@ TEST_F(ExprToSubfieldFilterTest, eqExpr) {
   ASSERT_EQ(bigintRange->lower(), 42);
   ASSERT_EQ(bigintRange->upper(), 42);
   ASSERT_FALSE(bigintRange->testNull());
+
+  call = parseCallExpr("b = 21.0+21.0", ROW({{"b", DOUBLE()}}));
+  Subfield subfield2;
+  filter = leafCallToSubfieldFilter(*call, subfield2, evaluator());
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield2, {"b"});
+  auto doubleRange = dynamic_cast<DoubleRange*>(filter.get());
+  ASSERT_TRUE(doubleRange);
+  ASSERT_EQ(doubleRange->lower(), 42);
+  ASSERT_EQ(doubleRange->upper(), 42);
+  ASSERT_FALSE(doubleRange->testNull());
+  ASSERT_TRUE(doubleRange->testDouble(42));
 }
 
 TEST_F(ExprToSubfieldFilterTest, eqSubfield) {
@@ -109,6 +144,18 @@ TEST_F(ExprToSubfieldFilterTest, eqSubfield) {
   ASSERT_EQ(bigintRange->lower(), 42);
   ASSERT_EQ(bigintRange->upper(), 42);
   ASSERT_FALSE(bigintRange->testNull());
+
+  call = parseCallExpr("c.d = 21.0 * 2.0", ROW({{"c", ROW({{"d", DOUBLE()}})}}));
+  Subfield subfield2;
+  filter = leafCallToSubfieldFilter(*call, subfield2, evaluator());
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield2, {"c", "d"});
+  auto doubleRange = dynamic_cast<DoubleRange*>(filter.get());
+  ASSERT_TRUE(doubleRange);
+  ASSERT_EQ(doubleRange->lower(), 42);
+  ASSERT_EQ(doubleRange->upper(), 42);
+  ASSERT_FALSE(doubleRange->testNull());
+  ASSERT_TRUE(doubleRange->testDouble(42));  
 }
 
 TEST_F(ExprToSubfieldFilterTest, neq) {
@@ -120,6 +167,15 @@ TEST_F(ExprToSubfieldFilterTest, neq) {
   ASSERT_TRUE(filter->testInt64(41));
   ASSERT_FALSE(filter->testInt64(42));
   ASSERT_TRUE(filter->testInt64(43));
+
+  call = parseCallExpr("b <> 42.0", ROW({{"b", DOUBLE()}}));
+  Subfield subfield2;
+  filter = leafCallToSubfieldFilter(*call, subfield2, evaluator());
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield2, {"b"});
+  ASSERT_TRUE(filter->testDouble(41));
+  ASSERT_FALSE(filter->testDouble(42));
+  ASSERT_TRUE(filter->testDouble(43));
 }
 
 TEST_F(ExprToSubfieldFilterTest, lte) {
@@ -131,6 +187,16 @@ TEST_F(ExprToSubfieldFilterTest, lte) {
   ASSERT_TRUE(filter->testInt64(41));
   ASSERT_TRUE(filter->testInt64(42));
   ASSERT_FALSE(filter->testInt64(43));
+
+  call = parseCallExpr("b <= 42.0", ROW({{"b", DOUBLE()}}));
+  Subfield subfield2;
+  filter = leafCallToSubfieldFilter(*call, subfield2, evaluator());
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield2, {"b"});
+  ASSERT_FALSE(filter->testNull());
+  ASSERT_TRUE(filter->testDouble(41));
+  ASSERT_TRUE(filter->testDouble(42));
+  ASSERT_FALSE(filter->testDouble(43));
 }
 
 TEST_F(ExprToSubfieldFilterTest, lt) {
@@ -250,5 +316,119 @@ TEST_F(ExprToSubfieldFilterTest, dereferenceWithEmptyField) {
   ASSERT_FALSE(filter);
 }
 
+TEST_F(ExprToSubfieldFilterTest, doubleBetweenAndInTests) {
+  // 测试DOUBLE类型的between操作
+  auto call = parseCallExpr("a between 40.5 and 42.5", ROW({{"a", DOUBLE()}}));
+  Subfield subfield;
+  auto filter = leafCallToSubfieldFilter(*call, subfield, evaluator());
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield, {"a"});
+  ASSERT_FALSE(filter->testDouble(40.0));
+  ASSERT_TRUE(filter->testDouble(40.5));
+  ASSERT_TRUE(filter->testDouble(41.5));
+  ASSERT_TRUE(filter->testDouble(42.5));
+  ASSERT_FALSE(filter->testDouble(43.0));
+}
+
+TEST_F(ExprToSubfieldFilterTest, varbinaryTests) {
+  // 测试VARBINARY类型的等值比较
+  auto call = parseCallExpr("a = cast('binary' as VARBINARY)", ROW({{"a", VARBINARY()}}));
+  Subfield subfield;
+  auto filter = leafCallToSubfieldFilter(*call, subfield, evaluator());
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield, {"a"});
+  auto bytesValues = dynamic_cast<BytesValues*>(filter.get());
+  ASSERT_TRUE(bytesValues);
+  ASSERT_FALSE(bytesValues->testNull());
+  std::string binary = "binary";
+  ASSERT_TRUE(bytesValues->testBytes(binary.c_str(), binary.size()));
+  std::string other = "other";
+  ASSERT_FALSE(bytesValues->testBytes(other.c_str(), other.size()));
+
+  // 测试VARBINARY类型的不等比较
+  call = parseCallExpr("a <> cast('binary' as VARBINARY)", ROW({{"a", VARBINARY()}}));
+  Subfield subfield2;
+  filter = leafCallToSubfieldFilter(*call, subfield2, evaluator());
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield2, {"a"});
+  ASSERT_FALSE(filter->testBytes(binary.c_str(), binary.size()));
+  ASSERT_TRUE(filter->testBytes(other.c_str(), other.size()));
+}
+
+TEST_F(ExprToSubfieldFilterTest, varbinaryComparisonTests) {
+  // 测试VARBINARY类型的小于比较
+  auto call = parseCallExpr("a < cast('binary' as VARBINARY)", ROW({{"a", VARBINARY()}}));
+  Subfield subfield;
+  auto filter = leafCallToSubfieldFilter(*call, subfield, evaluator());
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield, {"a"});
+  std::string before = "ainary";
+  std::string target = "binary";
+  std::string after = "cinary";
+  ASSERT_TRUE(filter->testBytes(before.c_str(), before.size()));
+  ASSERT_FALSE(filter->testBytes(target.c_str(), target.size()));
+  ASSERT_FALSE(filter->testBytes(after.c_str(), after.size()));
+
+  // 测试VARBINARY类型的大于比较
+  call = parseCallExpr("a > cast('binary' as VARBINARY)", ROW({{"a", VARBINARY()}}));
+  Subfield subfield2;
+  filter = leafCallToSubfieldFilter(*call, subfield2, evaluator());
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield2, {"a"});
+  ASSERT_FALSE(filter->testBytes(before.c_str(), before.size()));
+  ASSERT_FALSE(filter->testBytes(target.c_str(), target.size()));
+  ASSERT_TRUE(filter->testBytes(after.c_str(), after.size()));
+
+  // 测试VARBINARY类型的小于等于比较
+  call = parseCallExpr("a <= cast('binary' as VARBINARY)", ROW({{"a", VARBINARY()}}));
+  Subfield subfield3;
+  filter = leafCallToSubfieldFilter(*call, subfield3, evaluator());
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield3, {"a"});
+  ASSERT_TRUE(filter->testBytes(before.c_str(), before.size()));
+  ASSERT_TRUE(filter->testBytes(target.c_str(), target.size()));
+  ASSERT_FALSE(filter->testBytes(after.c_str(), after.size()));
+
+  // 测试VARBINARY类型的大于等于比较
+  call = parseCallExpr("a >= cast('binary' as VARBINARY)", ROW({{"a", VARBINARY()}}));
+  Subfield subfield4;
+  filter = leafCallToSubfieldFilter(*call, subfield4, evaluator());
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield4, {"a"});
+  ASSERT_FALSE(filter->testBytes(before.c_str(), before.size()));
+  ASSERT_TRUE(filter->testBytes(target.c_str(), target.size()));
+  ASSERT_TRUE(filter->testBytes(after.c_str(), after.size()));
+}
+
+TEST_F(ExprToSubfieldFilterTest, varbinaryInTests) {
+  std::string before = "aaa";
+  std::string middle = "bbb";
+  std::string upper = "ccc";
+  std::string after = "ddd";
+
+  // 测试VARBINARY类型的in操作
+  auto call = parseCallExpr("a in (cast('aaa' as VARBINARY), cast('ccc' as VARBINARY))", 
+                      ROW({{"a", VARBINARY()}}));
+  Subfield subfield2;
+  auto filter = leafCallToSubfieldFilter(*call, subfield2, evaluator());
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield2, {"a"});
+  ASSERT_TRUE(filter->testBytes(before.c_str(), before.size()));
+  ASSERT_FALSE(filter->testBytes(middle.c_str(), middle.size()));
+  ASSERT_TRUE(filter->testBytes(upper.c_str(), upper.size()));
+  ASSERT_FALSE(filter->testBytes(after.c_str(), after.size()));
+}
+
+TEST_F(ExprToSubfieldFilterTest, varbinaryIsNullTests) {
+  // 测试VARBINARY类型的is null操作
+  auto call = parseCallExpr("a is null", ROW({{"a", VARBINARY()}}));
+  Subfield subfield;
+  auto filter = leafCallToSubfieldFilter(*call, subfield, evaluator());
+  ASSERT_TRUE(filter);
+  validateSubfield(subfield, {"a"});
+  std::string value = "value";
+  ASSERT_FALSE(filter->testBytes(value.c_str(), value.size()));
+  ASSERT_TRUE(filter->testNull());
+}
 } // namespace
 } // namespace facebook::velox::exec
