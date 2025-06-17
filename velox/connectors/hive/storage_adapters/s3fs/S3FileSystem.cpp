@@ -379,12 +379,14 @@ class S3WriteFile::Impl {
       request.SetUploadId(uploadState_.id);
       request.SetPartNumber(++uploadState_.partNumber);
       request.SetContentLength(part.size());
+      VLOG(1) << "uploadPart: " << bucket_ << " " << key_ << " " << uploadState_.id
+              << " " << uploadState_.partNumber << " " << part.size();
       request.SetBody(
           std::make_shared<StringViewStream>(part.data(), part.size()));
       // The default algorithm used is MD5. However, MD5 is not supported with
       // fips and can cause a SIGSEGV. Set CRC32 instead which is a standard for
       // checksum computation and is not restricted by fips.
-      request.SetChecksumAlgorithm(Aws::S3::Model::ChecksumAlgorithm::CRC32);
+      // request.SetChecksumAlgorithm(Aws::S3::Model::ChecksumAlgorithm::CRC32);
       auto outcome = client_->UploadPart(request);
       VELOX_CHECK_AWS_OUTCOME(outcome, "Failed to upload", bucket_, key_);
       // Append ETag and part number for this uploaded part.
