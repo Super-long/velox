@@ -235,7 +235,8 @@ class S3WriteFile::Impl {
       request.SetBucket(awsString(bucket_));
       request.SetKey(awsString(key_));
       auto objectMetadata = client_->HeadObject(request);
-      VELOX_CHECK(!objectMetadata.IsSuccess(), "S3 object already exists");
+      VELOX_CHECK(!objectMetadata.IsSuccess(),
+        fmt::format("S3 object already exists: {}/{}", bucket_, key_));
     }
 
     // Create bucket if not present.
