@@ -26,6 +26,7 @@
 #include <fmt/format.h>
 #include <glog/logging.h>
 #include <memory>
+#include <chrono>
 #include <stdexcept>
 
 #include <aws/core/Aws.h>
@@ -97,10 +98,19 @@ class S3ReadFile final : public ReadFile {
     request.SetBucket(awsString(bucket_));
     request.SetKey(awsString(key_));
 
+    auto start = std::chrono::high_resolution_clock::now();
     auto outcome = client_->HeadObject(request);
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
     VELOX_CHECK_AWS_OUTCOME(
         outcome, "Failed to get metadata for S3 object", bucket_, key_);
     length_ = outcome.GetResult().GetContentLength();
+
+    LOG(INFO) << "S3 HeadObject time: " << duration.count() << "ms"
+              << " bucket: " << bucket_ << " key: " << key_
+              << " length: " << length_;
+
     VELOX_CHECK_GE(length_, 0);
   }
 
@@ -180,7 +190,17 @@ class S3ReadFile final : public ReadFile {
     request.SetRange(awsString(ss.str()));
     request.SetResponseStreamFactory(
         AwsWriteableStreamFactory(position, length));
+
+    auto start = std::chrono::high_resolution_clock::now();
     auto outcome = client_->GetObject(request);
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration =
+        std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+
+    LOG(INFO) << "S3 GetObject time: " << duration.count() << "ms"
+              << " bucket: " << bucket_ << " key: " << key_
+              << " offset: " << offset << " length: " << length;
+
     VELOX_CHECK_AWS_OUTCOME(outcome, "Failed to get S3 object", bucket_, key_);
   }
 
