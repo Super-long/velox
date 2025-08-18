@@ -98,9 +98,14 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> getCredentialsProviderByName(
 
 class S3ReadFile final : public ReadFile {
  public:
-  S3ReadFile(std::string_view path, Aws::S3::S3Client* client)
+  S3ReadFile(std::string_view fullPath, Aws::S3::S3Client* client)
       : client_(client) {
-    getBucketAndKeyFromPath(path, bucket_, key_);
+    // Parse the full path to extract scheme and path components
+    const auto pathInfo = parseS3Path(fullPath);
+    scheme_ = pathInfo.scheme;
+    
+    // Extract bucket and key from the path without scheme
+    getBucketAndKeyFromPath(pathInfo.path, bucket_, key_);
   }
 
   // Gets the length of the file.
@@ -192,7 +197,7 @@ class S3ReadFile final : public ReadFile {
   }
 
   std::string getName() const final {
-    return fmt::format("s3://{}/{}", bucket_, key_);
+    return fmt::format("{}{}/{}", scheme_, bucket_, key_);
   }
 
   uint64_t getNaturalReadSize() const final {
@@ -228,6 +233,7 @@ class S3ReadFile final : public ReadFile {
   Aws::S3::S3Client* client_;
   std::string bucket_;
   std::string key_;
+  std::string_view scheme_;
   int64_t length_ = -1;
 };
 
@@ -860,8 +866,7 @@ std::string S3FileSystem::getLogPrefix() const {
 std::unique_ptr<ReadFile> S3FileSystem::openFileForRead(
     std::string_view s3Path,
     const FileOptions& options) {
-  const auto path = getPath(s3Path);
-  auto s3file = std::make_unique<S3ReadFile>(path, impl_->s3Client());
+  auto s3file = std::make_unique<S3ReadFile>(s3Path, impl_->s3Client());
   s3file->initialize(options);
   return s3file;
 }
