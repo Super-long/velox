@@ -98,8 +98,28 @@ std::shared_ptr<Aws::Auth::AWSCredentialsProvider> getCredentialsProviderByName(
 
 class S3ReadFile final : public ReadFile {
  public:
-  S3ReadFile(std::string_view path, Aws::S3::S3Client* client)
+  S3ReadFile(std::string_view fullPath, Aws::S3::S3Client* client)
       : client_(client) {
+    // Extract and store the schema from the full path
+    if (isS3AwsFile(fullPath)) {
+      scheme_ = kS3Scheme;
+    } else if (isS3aFile(fullPath)) {
+      scheme_ = kS3aScheme;
+    } else if (isS3nFile(fullPath)) {
+      scheme_ = kS3nScheme;
+    } else if (isOssFile(fullPath)) {
+      scheme_ = kOssScheme;
+    } else if (isCosFile(fullPath)) {
+      scheme_ = kCosScheme;
+    } else if (isCosNFile(fullPath)) {
+      scheme_ = kCosNScheme;
+    } else {
+      // Default to s3:// if no known scheme is found
+      scheme_ = kS3Scheme;
+    }
+    
+    // Get the path without scheme for bucket/key extraction
+    const auto path = getPath(fullPath);
     getBucketAndKeyFromPath(path, bucket_, key_);
   }
 
@@ -192,7 +212,7 @@ class S3ReadFile final : public ReadFile {
   }
 
   std::string getName() const final {
-    return fmt::format("s3://{}/{}", bucket_, key_);
+    return fmt::format("{}{}/{}", scheme_, bucket_, key_);
   }
 
   uint64_t getNaturalReadSize() const final {
@@ -228,6 +248,7 @@ class S3ReadFile final : public ReadFile {
   Aws::S3::S3Client* client_;
   std::string bucket_;
   std::string key_;
+  std::string_view scheme_;
   int64_t length_ = -1;
 };
 
@@ -860,8 +881,7 @@ std::string S3FileSystem::getLogPrefix() const {
 std::unique_ptr<ReadFile> S3FileSystem::openFileForRead(
     std::string_view s3Path,
     const FileOptions& options) {
-  const auto path = getPath(s3Path);
-  auto s3file = std::make_unique<S3ReadFile>(path, impl_->s3Client());
+  auto s3file = std::make_unique<S3ReadFile>(s3Path, impl_->s3Client());
   s3file->initialize(options);
   return s3file;
 }
