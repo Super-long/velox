@@ -100,27 +100,12 @@ class S3ReadFile final : public ReadFile {
  public:
   S3ReadFile(std::string_view fullPath, Aws::S3::S3Client* client)
       : client_(client) {
-    // Extract and store the schema from the full path
-    if (isS3AwsFile(fullPath)) {
-      scheme_ = kS3Scheme;
-    } else if (isS3aFile(fullPath)) {
-      scheme_ = kS3aScheme;
-    } else if (isS3nFile(fullPath)) {
-      scheme_ = kS3nScheme;
-    } else if (isOssFile(fullPath)) {
-      scheme_ = kOssScheme;
-    } else if (isCosFile(fullPath)) {
-      scheme_ = kCosScheme;
-    } else if (isCosNFile(fullPath)) {
-      scheme_ = kCosNScheme;
-    } else {
-      // Default to s3:// if no known scheme is found
-      scheme_ = kS3Scheme;
-    }
+    // Parse the full path to extract scheme and path components
+    const auto pathInfo = parseS3Path(fullPath);
+    scheme_ = pathInfo.scheme;
     
-    // Get the path without scheme for bucket/key extraction
-    const auto path = getPath(fullPath);
-    getBucketAndKeyFromPath(path, bucket_, key_);
+    // Extract bucket and key from the path without scheme
+    getBucketAndKeyFromPath(pathInfo.path, bucket_, key_);
   }
 
   // Gets the length of the file.
