@@ -46,6 +46,7 @@
 #include "velox/exec/Unnest.h"
 #include "velox/exec/Values.h"
 #include "velox/exec/Window.h"
+#include "velox/exec/Deduplicate.cpp"
 
 namespace facebook::velox::exec {
 
@@ -594,6 +595,11 @@ std::shared_ptr<Driver> DriverFactory::createDriver(
                 planNode)) {
       operators.push_back(std::make_unique<trace::QueryTraceScan>(
           id, ctx.get(), queryReplayScanNode));
+    } else if (
+        auto deduplicateNode =
+            std::dynamic_pointer_cast<const core::DeduplicateNode>(planNode)) {
+      operators.push_back(std::make_unique<Deduplicate>(
+          id, ctx.get(), deduplicateNode));
     } else {
       std::unique_ptr<Operator> extended;
       if (planNode->requiresExchangeClient()) {

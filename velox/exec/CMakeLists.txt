@@ -24,6 +24,8 @@ velox_add_library(
   ArrowStream.cpp
   AssignUniqueId.cpp
   ContainerRowSerde.cpp
+  Deduplicate.cpp
+  DeduplicateBuild.cpp
   DistinctAggregations.cpp
   Driver.cpp
   EnforceSingleRow.cpp

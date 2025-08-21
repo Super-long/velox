@@ -31,7 +31,7 @@ DEFINE_bool(
 // Used in common/base/VeloxException.cpp
 DEFINE_bool(
     velox_exception_user_stacktrace_enabled,
-    false,
+    true,
     "Enable the stacktrace for user type of VeloxException");
 
 DEFINE_bool(

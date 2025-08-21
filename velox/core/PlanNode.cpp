@@ -107,7 +107,7 @@ AggregationNode::AggregationNode(
     const std::vector<FieldAccessTypedExprPtr>& groupingKeys,
     const std::vector<FieldAccessTypedExprPtr>& preGroupedKeys,
     const std::vector<std::string>& aggregateNames,
-    const std::vector<Aggregate>& aggregates,
+    const std::vector<AggregationNode::Aggregate>& aggregates,
     const std::vector<vector_size_t>& globalGroupingSets,
     const std::optional<FieldAccessTypedExprPtr>& groupId,
     bool ignoreNullKeys,
@@ -173,7 +173,7 @@ AggregationNode::AggregationNode(
     const std::vector<FieldAccessTypedExprPtr>& groupingKeys,
     const std::vector<FieldAccessTypedExprPtr>& preGroupedKeys,
     const std::vector<std::string>& aggregateNames,
-    const std::vector<Aggregate>& aggregates,
+    const std::vector<AggregationNode::Aggregate>& aggregates,
     bool ignoreNullKeys,
     PlanNodePtr source)
     : AggregationNode(
@@ -2305,6 +2305,7 @@ void PlanNode::registerSerDe() {
 
   registry.Register("AggregationNode", AggregationNode::create);
   registry.Register("AssignUniqueIdNode", AssignUniqueIdNode::create);
+  registry.Register("DeduplicateNode", DeduplicateNode::create);
   registry.Register("EnforceSingleRowNode", EnforceSingleRowNode::create);
   registry.Register("ExchangeNode", ExchangeNode::create);
   registry.Register("ExpandNode", ExpandNode::create);
@@ -2376,6 +2377,84 @@ PlanNodePtr FilterNode::create(const folly::dynamic& obj, void* context) {
   auto filter = ISerializable::deserialize<ITypedExpr>(obj["filter"]);
   return std::make_shared<FilterNode>(
       deserializePlanNodeId(obj), filter, std::move(source));
+}
+
+// DeduplicateNode implementation
+
+const char* DeduplicateNode::modeName(Mode mode) {
+  switch (mode) {
+    case Mode::kField:
+      return "FIELD";
+    case Mode::kRow:
+      return "ROW";
+  }
+  VELOX_UNREACHABLE();
+}
+
+DeduplicateNode::Mode DeduplicateNode::modeFromName(const std::string& name) {
+  if (name == "FIELD") {
+    return Mode::kField;
+  }
+  if (name == "ROW") {
+    return Mode::kRow;
+  }
+  VELOX_USER_FAIL("Unknown deduplicate mode: {}", name);
+}
+
+DeduplicateNode::DeduplicateNode(
+    PlanNodeId id,
+    std::vector<TypedExprPtr> keys,
+    std::vector<SortOrder> sortingOrders,
+    TypedExprPtr sortingKey,
+    Mode mode,
+    PlanNodePtr source)
+    : PlanNode(std::move(id)),
+      keys_(std::move(keys)),
+      sortingOrders_(std::move(sortingOrders)),
+      sortingKey_(std::move(sortingKey)),
+      mode_(mode),
+      sources_{std::move(source)} {
+  VELOX_USER_CHECK_EQ(
+      keys_.size(),
+      sortingOrders_.size(),
+      "Number of keys and sorting orders must be the same");
+}
+
+void DeduplicateNode::addDetails(std::stringstream& stream) const {
+  stream << " mode: " << modeName(mode_);
+}
+
+folly::dynamic DeduplicateNode::serialize() const {
+  auto obj = PlanNode::serialize();
+  obj["keys"] = ISerializable::serialize(keys_);
+  obj["sortingOrders"] = serializeSortingOrders(sortingOrders_);
+  obj["sortingKey"] = sortingKey_ ? ISerializable::serialize(sortingKey_)
+                                  : folly::dynamic::object();
+  obj["mode"] = modeName(mode_);
+  return obj;
+}
+
+PlanNodePtr DeduplicateNode::create(const folly::dynamic& obj, void* context) {
+  auto source = ISerializable::deserialize<PlanNode>(obj["source"], context);
+  auto keys =
+      ISerializable::deserialize<std::vector<ITypedExpr>>(obj["keys"], context);
+  auto sortingOrders = deserializeSortingOrders(obj["sortingOrders"]);
+
+  core::TypedExprPtr sortingKey = nullptr;
+  if (obj.count("sortingKey") && !obj["sortingKey"].empty()) {
+    sortingKey =
+        ISerializable::deserialize<ITypedExpr>(obj["sortingKey"], context);
+  }
+
+  auto mode = modeFromName(obj["mode"].asString());
+
+  return std::make_shared<DeduplicateNode>(
+      deserializePlanNodeId(obj),
+      std::move(keys),
+      std::move(sortingOrders),
+      std::move(sortingKey),
+      mode,
+      std::move(source));
 }
 
 } // namespace facebook::velox::core

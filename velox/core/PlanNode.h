@@ -126,7 +126,8 @@ class PlanNode : public ISerializable {
   virtual const std::vector<std::shared_ptr<const PlanNode>>& sources()
       const = 0;
 
-  virtual void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) = 0;
+  virtual void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) = 0;
 
   /// Returns true if this is a leaf plan node and corresponding operator
   /// requires an ExchangeClient to retrieve data. For instance, TableScanNode
@@ -244,8 +245,9 @@ class ValuesNode : public PlanNode {
   }
 
   const std::vector<PlanNodePtr>& sources() const override;
-  
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {}
+
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {}
 
   const std::vector<RowVectorPtr>& values() const {
     return values_;
@@ -299,7 +301,8 @@ class ArrowStreamNode : public PlanNode {
 
   const std::vector<PlanNodePtr>& sources() const override;
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {}
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {}
 
   const std::shared_ptr<ArrowArrayStream>& arrowStream() const {
     return arrowStream_;
@@ -334,7 +337,8 @@ class QueryTraceScanNode final : public PlanNode {
 
   const std::vector<PlanNodePtr>& sources() const override;
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {}
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {}
 
   std::string_view name() const override {
     return "QueryReplayScan";
@@ -373,7 +377,8 @@ class FilterNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -430,7 +435,8 @@ class ProjectNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -489,7 +495,8 @@ class TableScanNode : public PlanNode {
 
   const std::vector<PlanNodePtr>& sources() const override;
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {}
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {}
 
   const RowTypePtr& outputType() const override {
     return outputType_;
@@ -609,7 +616,8 @@ class AggregationNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -778,7 +786,8 @@ class TableWriteNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -869,7 +878,8 @@ class TableWriteMergeNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -919,7 +929,8 @@ class ExpandNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -991,7 +1002,8 @@ class GroupIdNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -1041,7 +1053,10 @@ class GroupIdNode : public PlanNode {
 
 class ExchangeNode : public PlanNode {
  public:
-  ExchangeNode(const PlanNodeId& id, RowTypePtr type, std::vector<PlanNodePtr> sources = {})
+  ExchangeNode(
+      const PlanNodeId& id,
+      RowTypePtr type,
+      std::vector<PlanNodePtr> sources = {})
       : PlanNode(id), outputType_(type), sources_(sources) {}
 
   const RowTypePtr& outputType() const override {
@@ -1052,7 +1067,8 @@ class ExchangeNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -1132,7 +1148,8 @@ class LocalMergeNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -1276,7 +1293,8 @@ class LocalPartitionNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -1394,7 +1412,8 @@ class PartitionedOutputNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -1609,7 +1628,8 @@ class AbstractJoinNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -1822,7 +1842,8 @@ class NestedLoopJoinNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -1908,7 +1929,8 @@ class OrderByNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -1962,7 +1984,8 @@ class TopNNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -2022,7 +2045,8 @@ class LimitNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -2090,7 +2114,8 @@ class UnnestNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -2142,7 +2167,8 @@ class EnforceSingleRowNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -2186,7 +2212,8 @@ class AssignUniqueIdNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -2294,7 +2321,8 @@ class WindowNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -2385,7 +2413,8 @@ class RowNumberNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -2446,7 +2475,8 @@ class MarkDistinctNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -2513,7 +2543,8 @@ class TopNRowNumberNode : public PlanNode {
     return sources_;
   }
 
-  void changeSources(std::vector<std::shared_ptr<const PlanNode>> sources) override {
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
     sources_ = sources;
   }
 
@@ -2570,6 +2601,87 @@ class TopNRowNumberNode : public PlanNode {
   std::vector<PlanNodePtr> sources_;
 
   const RowTypePtr outputType_;
+};
+
+/// Deduplicate operator for time series data. Supports both field-level and
+/// row-level deduplication within partitions.
+/// Field-level: For each field, select the latest non-null value from the
+/// partition. Row-level: Based on specified sorting columns, select the row
+/// with maximum value.
+class DeduplicateNode : public PlanNode {
+ public:
+  enum class Mode {
+    // Field-level deduplication: merge fields by selecting latest non-null
+    // values
+    kField,
+    // Row-level deduplication: select row with maximum value based on sort keys
+    kRow
+  };
+
+  static const char* modeName(Mode mode);
+  static Mode modeFromName(const std::string& name);
+
+  /// @param keys Keys for partitioning and sorting within partitions.
+  /// @param sortingOrders Sorting orders corresponding to keys.
+  /// @param mode Deduplication mode (field-level or row-level).
+  /// @param source Input plan node.
+  DeduplicateNode(
+      PlanNodeId id,
+      std::vector<TypedExprPtr> keys,
+      std::vector<SortOrder> sortingOrders,
+      TypedExprPtr sortingKey,
+      Mode mode,
+      PlanNodePtr source);
+
+  const std::vector<PlanNodePtr>& sources() const override {
+    return sources_;
+  }
+
+  void changeSources(
+      std::vector<std::shared_ptr<const PlanNode>> sources) override {
+    sources_ = sources;
+  }
+
+  const RowTypePtr& outputType() const override {
+    return sources_[0]->outputType();
+  }
+
+  bool canSpill(const QueryConfig& queryConfig) const override {
+    return false;
+  }
+
+  const std::vector<TypedExprPtr>& keys() const {
+    return keys_;
+  }
+
+  const std::vector<SortOrder>& sortingOrders() const {
+    return sortingOrders_;
+  }
+
+  const TypedExprPtr& sortingKey() const {
+    return sortingKey_;
+  }
+
+  Mode mode() const {
+    return mode_;
+  }
+
+  std::string_view name() const override {
+    return "Deduplicate";
+  }
+
+  folly::dynamic serialize() const override;
+
+  static PlanNodePtr create(const folly::dynamic& obj, void* context);
+
+ private:
+  void addDetails(std::stringstream& stream) const override;
+
+  const std::vector<TypedExprPtr> keys_;
+  const std::vector<SortOrder> sortingOrders_;
+  const TypedExprPtr sortingKey_;
+  const Mode mode_;
+  std::vector<PlanNodePtr> sources_;
 };
 
 } // namespace facebook::velox::core
