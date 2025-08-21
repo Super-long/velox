@@ -29,6 +29,10 @@
 #include "velox/exec/tests/utils/TempDirectoryPath.h"
 #include "velox/functions/prestosql/aggregates/RegisterAggregateFunctions.h"
 #include "velox/vector/fuzzer/VectorFuzzer.h"
+#ifdef VELOX_ENABLE_PARQUET
+#include "velox/dwio/parquet/reader/ParquetReader.h"
+#include "velox/dwio/parquet/writer/Writer.h"
+#endif
 
 #include <re2/re2.h>
 #include <string>
@@ -223,8 +227,15 @@ class TableWriteTest : public HiveConnectorTestBase {
     LOG(INFO) << testParam_.toString();
 
     auto rowType =
-        ROW({"c0", "c1", "c2", "c3", "c4", "c5"},
-            {BIGINT(), INTEGER(), SMALLINT(), REAL(), DOUBLE(), VARCHAR()});
+        ROW({"c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7"},
+            {BIGINT(),
+             INTEGER(),
+             SMALLINT(),
+             REAL(),
+             VARCHAR(),
+             VARCHAR(),
+             VARCHAR(),
+             VARCHAR()});
     setDataTypes(rowType);
     if (testMode_ == TestMode::kPartitioned ||
         testMode_ == TestMode::kBucketed) {
@@ -4087,7 +4098,6 @@ DEBUG_ONLY_TEST_F(
     vectors.push_back(fuzzer.fuzzInputRow(rowType_));
     vectors.back()->childAt(0) = partitionKeyVector;
   }
-
   createDuckDbTable(vectors);
 
   auto queryPool = memory::memoryManager()->addRootPool(
@@ -4486,4 +4496,628 @@ DEBUG_ONLY_TEST_F(
 
   queryThread.join();
   waitForAllTasksToBeDeleted();
+}
+
+// Compact Mode Tests
+class CompactModeTableWriterTest : public HiveConnectorTestBase {
+ protected:
+  void SetUp() override {
+    HiveConnectorTestBase::SetUp();
+
+    rowType_ =
+        ROW({"c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7"},
+            {BIGINT(),
+             INTEGER(),
+             SMALLINT(),
+             REAL(),
+             VARBINARY(),
+             VARBINARY(),
+             VARBINARY(),
+             VARBINARY()});
+
+    setDataTypes(rowType_);
+  }
+
+  void setDataTypes(const RowTypePtr& outputRowType) {
+    rowType_ = outputRowType;
+  }
+
+  void printRowVector(
+      const RowVectorPtr& rowVector,
+      const std::string& title = "") {
+    if (!title.empty()) {
+      std::cout << "\n=== " << title << " ===" << std::endl;
+    }
+
+    if (!rowVector || rowVector->size() == 0) {
+      std::cout << "Empty or null vector" << std::endl;
+      return;
+    }
+
+    auto rowType = std::dynamic_pointer_cast<const RowType>(rowVector->type());
+
+    for (vector_size_t row = 0; row < rowVector->size(); ++row) {
+      std::cout << "Row " << row << ": ";
+      for (column_index_t col = 0; col < rowVector->childrenSize(); ++col) {
+        auto vector = rowVector->childAt(col);
+        std::cout << rowType->nameOf(col) << "=";
+
+        if (vector->isNullAt(row)) {
+          std::cout << "null";
+        } else {
+          switch (vector->typeKind()) {
+            case TypeKind::BIGINT:
+              std::cout << vector->asFlatVector<int64_t>()->valueAt(row);
+              break;
+            case TypeKind::INTEGER:
+              std::cout << vector->asFlatVector<int32_t>()->valueAt(row);
+              break;
+            case TypeKind::VARBINARY:
+              std::cout << "\""
+                        << vector->asFlatVector<StringView>()->valueAt(row)
+                        << "\"";
+              break;
+            case TypeKind::DOUBLE:
+              std::cout << vector->asFlatVector<double>()->valueAt(row);
+              break;
+            case TypeKind::REAL:
+              std::cout << vector->asFlatVector<float>()->valueAt(row);
+              break;
+            case TypeKind::BOOLEAN:
+              std::cout
+                  << (vector->asFlatVector<bool>()->valueAt(row) ? "true"
+                                                                 : "false");
+              break;
+            default:
+              std::cout << "<unsupported_type>";
+              break;
+          }
+        }
+
+        if (col < rowVector->childrenSize() - 1) {
+          std::cout << ", ";
+        }
+      }
+      std::cout << std::endl;
+    }
+  }
+
+  core::PlanNodePtr createCompactTableWritePlan(
+      const std::vector<RowVectorPtr>& vectors,
+      const RowTypePtr& outputRowType,
+      const std::string& outputDirectoryPath,
+      dwio::common::FileFormat fileFormat = dwio::common::FileFormat::PARQUET,
+      const std::shared_ptr<dwio::common::WriterOptions>& writerOptions =
+          nullptr,
+      uint64_t fileSizeThreshold = 1024,
+      const std::vector<std::string>& sortKeyColumns = {"c4", "c5"},
+      const std::string& timeColumn = "c0",
+      std::function<std::string(int)> fileNameGenerator = nullptr) {
+    return PlanBuilder()
+        .values(vectors)
+        .tableWrite(
+            outputDirectoryPath,
+            fileFormat,
+            kHiveConnectorId,
+            fileSizeThreshold,
+            sortKeyColumns,
+            timeColumn,
+            fileNameGenerator,
+            writerOptions)
+        .planNode();
+  }
+
+  RowVectorPtr createTestVector(int32_t size, int32_t startValue = 0) {
+    return makeRowVector(
+        rowType_->names(), // 使用 rowType_ 的列名
+        {makeFlatVector<int64_t>(
+             size, [startValue](auto row) { return startValue + row; }),
+         makeFlatVector<int32_t>(
+             size, [startValue](auto row) { return startValue + row * 2; }),
+         makeFlatVector<int16_t>(
+             size, [startValue](auto row) { return startValue + row * 3; }),
+         makeFlatVector<float>(
+             size, [startValue](auto row) { return startValue + row * 1.5f; }),
+         makeFlatVector<StringView>(
+             size,
+             [startValue](auto row) {
+               return StringView::makeInline(
+                   fmt::format("str_{}", startValue + row));
+             },
+             nullptr,
+             VARBINARY()),
+         makeFlatVector<StringView>(
+             size,
+             [startValue](auto row) {
+               return StringView::makeInline(
+                   fmt::format("col5_{}", startValue + row));
+             },
+             nullptr,
+             VARBINARY()),
+         makeFlatVector<StringView>(
+             size,
+             [startValue](auto row) {
+               return StringView::makeInline(
+                   fmt::format("col6_{}", startValue + row));
+             },
+             nullptr,
+             VARBINARY()),
+         makeFlatVector<StringView>(
+             size,
+             [startValue](auto row) {
+               return StringView::makeInline(
+                   fmt::format("col7_{}", startValue + row));
+             },
+             nullptr,
+             VARBINARY())});
+  }
+
+  std::vector<RowVectorPtr> createRatioNullVector(
+      int32_t rowsPerBatch,
+      double nullRatio,
+      int32_t batchCount) {
+    std::vector<RowVectorPtr> vectors;
+
+    for (int32_t batch = 0; batch < batchCount; ++batch) {
+      auto nullGenerator = [nullRatio](auto row) {
+        return folly::Random().randDouble01() < nullRatio;
+      };
+
+      vectors.push_back(makeRowVector(
+          rowType_->names(), // 使用 rowType_ 的列名
+          {makeFlatVector<int64_t>(
+               rowsPerBatch,
+               [batch](auto row) { return batch * 10000 + row; },
+               nullGenerator),
+           makeFlatVector<int32_t>(
+               rowsPerBatch,
+               [batch](auto row) { return batch * 10000 + row * 2; },
+               nullGenerator),
+           makeFlatVector<int16_t>(
+               rowsPerBatch,
+               [batch](auto row) { return batch * 10000 + row * 3; },
+               nullGenerator),
+           makeFlatVector<float>(
+               rowsPerBatch,
+               [batch](auto row) { return batch * 10000.0f + row * 1.5f; },
+               nullGenerator),
+           makeFlatVector<StringView>(
+               rowsPerBatch,
+               [batch](auto row) {
+                 return StringView::makeInline(
+                     fmt::format("str_{}_{}", batch, row));
+               },
+               nullGenerator,
+               VARBINARY()),
+           makeFlatVector<StringView>(
+               rowsPerBatch,
+               [batch](auto row) {
+                 return StringView::makeInline(
+                     fmt::format("col5_{}_{}", batch, row));
+               },
+               nullGenerator,
+               VARBINARY()),
+           makeFlatVector<StringView>(
+               rowsPerBatch,
+               [batch](auto row) {
+                 return StringView::makeInline(
+                     fmt::format("col6_{}_{}", batch, row));
+               },
+               nullGenerator,
+               VARBINARY()),
+           makeFlatVector<StringView>(
+               rowsPerBatch,
+               [batch](auto row) {
+                 return StringView::makeInline(
+                     fmt::format("col7_{}_{}", batch, row));
+               },
+               nullGenerator,
+               VARBINARY())}));
+    }
+
+    return vectors;
+  }
+
+  RowVectorPtr createVectorWithNullColumn(
+      int32_t size,
+      int32_t nullColumnIndex) {
+    std::vector<VectorPtr> columns;
+
+    for (int i = 0; i < 8; ++i) {
+      if (i == nullColumnIndex) {
+        // Create a vector with all null values for the specified column
+        switch (i) {
+          case 0: // BIGINT
+            columns.push_back(makeNullableFlatVector<int64_t>(
+                std::vector<std::optional<int64_t>>(size, std::nullopt)));
+            break;
+          case 1: // INTEGER
+            columns.push_back(makeNullableFlatVector<int32_t>(
+                std::vector<std::optional<int32_t>>(size, std::nullopt)));
+            break;
+          case 2: // SMALLINT
+            columns.push_back(makeNullableFlatVector<int16_t>(
+                std::vector<std::optional<int16_t>>(size, std::nullopt)));
+            break;
+          case 3: // REAL
+            columns.push_back(makeNullableFlatVector<float>(
+                std::vector<std::optional<float>>(size, std::nullopt)));
+            break;
+          default: // VARBINARY (columns 4-7)
+            columns.push_back(makeNullableFlatVector<StringView>(
+                std::vector<std::optional<StringView>>(size, std::nullopt),
+                VARBINARY()));
+            break;
+        }
+      } else {
+        // Create normal data for other columns
+        switch (i) {
+          case 0: // BIGINT
+            columns.push_back(
+                makeFlatVector<int64_t>(size, [](auto row) { return row; }));
+            break;
+          case 1: // INTEGER
+            columns.push_back(makeFlatVector<int32_t>(
+                size, [](auto row) { return row * 2; }));
+            break;
+          case 2: // SMALLINT
+            columns.push_back(makeFlatVector<int16_t>(
+                size, [](auto row) { return row * 3; }));
+            break;
+          case 3: // REAL
+            columns.push_back(makeFlatVector<float>(
+                size, [](auto row) { return row * 1.5f; }));
+            break;
+          default: // VARBINARY (columns 4-7)
+            columns.push_back(makeFlatVector<StringView>(
+                size,
+                [i](auto row) {
+                  return StringView::makeInline(
+                      fmt::format("col{}_{}", i, row));
+                },
+                nullptr,
+                VARBINARY()));
+            break;
+        }
+      }
+    }
+
+    return makeRowVector(rowType_->names(), columns); // 使用 rowType_ 的列名
+  }
+
+  std::vector<std::string> listFiles(const std::string& directoryPath) {
+    std::vector<std::string> files;
+    for (const auto& entry :
+         std::filesystem::directory_iterator(directoryPath)) {
+      if (entry.is_regular_file()) {
+        files.push_back(entry.path().filename().string());
+      }
+    }
+    std::sort(files.begin(), files.end());
+    return files;
+  }
+
+  void verifyCompactOutput(
+      const std::string& outputPath,
+      int expectedFiles,
+      int expectedTotalRows) {
+    auto files = listFiles(outputPath);
+    EXPECT_EQ(files.size(), expectedFiles)
+        << "Unexpected number of output files";
+
+    int totalRows = 0;
+    for (const auto& file : files) {
+      auto filePath = fs::path(outputPath) / file;
+      auto split = HiveConnectorSplitBuilder(filePath.string())
+                       .fileFormat(dwio::common::FileFormat::PARQUET)
+                       .build();
+
+      auto rowType = asRowType(rowType_);
+      auto plan = PlanBuilder().tableScan(rowType).planNode();
+      auto result = AssertQueryBuilder(plan).split(split).copyResults(pool());
+
+      if (result && result->size() > 0) {
+        std::cout << "file: " << file << ", rows: " << result->size()
+                  << std::endl;
+        totalRows += result->size();
+      } else {
+        VELOX_CHECK(
+            result == nullptr && result->size() == 0, "result is not null");
+      }
+    }
+
+    EXPECT_EQ(totalRows, expectedTotalRows)
+        << "Unexpected total rows in output files";
+  }
+
+  RowTypePtr rowType_;
+};
+
+TEST_F(CompactModeTableWriterTest, basicCompactMode) {
+  auto outputDirectory = TempDirectoryPath::create();
+
+  // Create small batches to trigger file switching
+  std::vector<RowVectorPtr> vectors = {
+      createTestVector(3000, 0),
+      createTestVector(3000, 3000),
+      createTestVector(3000, 6000)};
+
+  auto parquetOptions = std::make_shared<parquet::WriterOptions>();
+  auto flushPolicyFactory = []() {
+    return std::make_unique<parquet::DefaultFlushPolicy>(100, 1024);
+  };
+  parquetOptions->flushPolicyFactory = flushPolicyFactory;
+
+  auto generator = [](int index) -> std::string {
+    return fmt::format("custom_file_{:04d}.", index);
+  };
+
+  auto plan = createCompactTableWritePlan(
+      vectors,
+      rowType_,
+      outputDirectory->getPath(),
+      dwio::common::FileFormat::PARQUET,
+      parquetOptions,
+      500, // fileSizeThreshold
+      {"c4", "c5"}, // sortKeyColumns - VARCHAR columns
+      "c0", // timeColumn - BIGINT column
+      generator);
+
+  auto results = AssertQueryBuilder(plan).copyResults(pool());
+
+  std::cout << "results: " << results->toString(0, 4) << std::endl;
+
+  // With small file size threshold, we expect multiple files
+  auto files = listFiles(outputDirectory->getPath());
+  EXPECT_GT(files.size(), 1) << "Expected multiple files in compact mode";
+
+  verifyCompactOutput(outputDirectory->getPath(), files.size(), 9000);
+}
+
+TEST_F(CompactModeTableWriterTest, emptySortKeyColumns) {
+  auto outputDirectory = TempDirectoryPath::create();
+
+  std::vector<RowVectorPtr> vectors = {createTestVector(50, 0)};
+
+  // Expect an error due to empty sort key columns during plan execution
+  EXPECT_THROW(
+      {
+        auto plan = createCompactTableWritePlan(
+            vectors,
+            rowType_,
+            outputDirectory->getPath(),
+            dwio::common::FileFormat::PARQUET,
+            nullptr,
+            100, // fileSizeThreshold
+            {}, // sortKeyColumns - Empty sort keys
+            "c0"); // timeColumn - BIGINT column
+
+        AssertQueryBuilder(plan).assertResults({makeRowVector({
+            makeFlatVector<int64_t>({50}),
+        })});
+      },
+      VeloxUserError);
+}
+
+TEST_F(CompactModeTableWriterTest, emptyTimeColumn) {
+  auto outputDirectory = TempDirectoryPath::create();
+
+  std::vector<RowVectorPtr> vectors = {createTestVector(50, 0)};
+
+  // Expect an error due to empty time column during plan execution
+  EXPECT_THROW(
+      {
+        auto plan = createCompactTableWritePlan(
+            vectors,
+            rowType_,
+            outputDirectory->getPath(),
+            dwio::common::FileFormat::PARQUET,
+            nullptr,
+            100, // fileSizeThreshold
+            {"c4", "c5"}, // sortKeyColumns - VARCHAR columns
+            ""); // timeColumn - Empty time column
+
+        AssertQueryBuilder(plan).assertResults({makeRowVector({
+            makeFlatVector<int64_t>({50}),
+        })});
+      },
+      VeloxUserError);
+}
+
+TEST_F(CompactModeTableWriterTest, invalidSortKeyColumn) {
+  auto outputDirectory = TempDirectoryPath::create();
+
+  std::vector<RowVectorPtr> vectors = {createTestVector(50, 0)};
+
+  EXPECT_THROW(
+      {
+        auto plan = createCompactTableWritePlan(
+            vectors,
+            rowType_,
+            outputDirectory->getPath(),
+            dwio::common::FileFormat::PARQUET,
+            nullptr,
+            100, // fileSizeThreshold
+            {"invalid_column"}, // sortKeyColumns - Invalid column
+            "c0");
+
+        AssertQueryBuilder(plan).assertResults({makeRowVector({
+            makeFlatVector<int64_t>({50}),
+        })});
+      },
+      VeloxUserError);
+}
+
+TEST_F(CompactModeTableWriterTest, invalidTimeColumn) {
+  auto outputDirectory = TempDirectoryPath::create();
+
+  std::vector<RowVectorPtr> vectors = {createTestVector(50, 0)};
+
+  EXPECT_THROW(
+      {
+        auto plan = createCompactTableWritePlan(
+            vectors,
+            rowType_,
+            outputDirectory->getPath(),
+            dwio::common::FileFormat::PARQUET,
+            nullptr,
+            100, // fileSizeThreshold
+            {"c4", "c5"}, // sortKeyColumns - VARCHAR columns
+            "invalid_column");
+
+        AssertQueryBuilder(plan).assertResults({makeRowVector({
+            makeFlatVector<int64_t>({50}),
+        })});
+      },
+      VeloxUserError);
+}
+
+TEST_F(CompactModeTableWriterTest, serialization) {
+  // Test CompactProperty serialization and deserialization
+  auto originalProperty = std::make_shared<connector::hive::CompactProperty>(
+      true, 2048, std::vector<std::string>{"c0", "c1", "c2"}, "c3");
+
+  // Serialize
+  auto serialized = originalProperty->serialize();
+
+  // Deserialize
+  auto deserializedProperty =
+      connector::hive::CompactProperty::deserialize(serialized, nullptr);
+
+  // Verify
+  EXPECT_EQ(deserializedProperty->enabled(), originalProperty->enabled());
+  EXPECT_EQ(
+      deserializedProperty->fileSizeThreshold(),
+      originalProperty->fileSizeThreshold());
+  EXPECT_EQ(
+      deserializedProperty->sortKeyColumns(),
+      originalProperty->sortKeyColumns());
+  EXPECT_EQ(deserializedProperty->timeColumn(), originalProperty->timeColumn());
+
+  // Custom generators should not be serialized
+  EXPECT_FALSE(deserializedProperty->hasCustomFileNameGenerator());
+}
+
+TEST_F(CompactModeTableWriterTest, largeScaleWithNulls) {
+  struct TestConfig {
+    int32_t rowsPerBatch;
+    double nullRatio;
+    int32_t batchCount;
+    uint64_t fileSizeThreshold;
+
+    std::string debugString() const {
+      return fmt::format(
+          "rowsPerBatch: {}, nullRatio: {}, batchCount: {}, fileSizeThreshold: {}",
+          rowsPerBatch,
+          nullRatio,
+          batchCount,
+          fileSizeThreshold);
+    }
+  };
+
+  std::vector<TestConfig> testConfigs = {
+      {1000000, 0.0, 5, 500},
+      {1000000, 0.1, 5, 500},
+      {1000000, 0.2, 5, 500},
+      {1000000, 0.3, 5, 500},
+      {1000000, 0.4, 5, 500},
+      {1000000, 0.5, 5, 500},
+      {1000000, 0.6, 5, 500},
+      {1000000, 0.7, 5, 500},
+      {1000000, 0.8, 5, 500},
+      {1000000, 0.9, 5, 500},
+  };
+
+  for (const auto& config : testConfigs) {
+    std::cout << "========= config: " << config.debugString() << std::endl;
+    SCOPED_TRACE(config.debugString());
+
+    auto outputDirectory = TempDirectoryPath::create();
+    auto vectors = createRatioNullVector(
+        config.rowsPerBatch, config.nullRatio, config.batchCount);
+
+    auto parquetOptions = std::make_shared<parquet::WriterOptions>();
+    auto flushPolicyFactory = []() {
+      return std::make_unique<parquet::DefaultFlushPolicy>(
+          500000, 1024 * 1024 * 1024);
+    };
+    parquetOptions->flushPolicyFactory = flushPolicyFactory;
+
+    auto generator = [](int index) -> std::string {
+      return fmt::format("custom_file_{:04d}.", index);
+    };
+
+    auto plan = createCompactTableWritePlan(
+        vectors,
+        rowType_,
+        outputDirectory->getPath(),
+        dwio::common::FileFormat::PARQUET,
+        nullptr,
+        config.fileSizeThreshold,
+        {"c4", "c5"}, // sortKeyColumns
+        "c0", // timeColumn
+        generator);
+
+    auto results = AssertQueryBuilder(plan).copyResults(pool());
+
+    std::cout << "results: " << results->toString(0, 4) << std::endl;
+
+    auto files = listFiles(outputDirectory->getPath());
+    EXPECT_GE(files.size(), 1) << "Expected at least 1 files";
+
+    int expectedTotalRows = config.rowsPerBatch * config.batchCount;
+    verifyCompactOutput(
+        outputDirectory->getPath(), files.size(), expectedTotalRows);
+  }
+}
+
+TEST_F(CompactModeTableWriterTest, allNullColumn) {
+  // Test with different columns being all null
+  std::vector<int> nullColumnIndices = {0, 1, 2, 3, 4, 5, 6, 7};
+
+  for (int nullColumnIndex : nullColumnIndices) {
+    SCOPED_TRACE(
+        fmt::format("Testing with null column index: {}", nullColumnIndex));
+
+    auto testOutputDirectory = TempDirectoryPath::create();
+
+    std::vector<RowVectorPtr> vectors = {
+        createVectorWithNullColumn(1000000, nullColumnIndex),
+        createVectorWithNullColumn(1000000, nullColumnIndex),
+        createVectorWithNullColumn(1000000, nullColumnIndex)};
+
+    auto parquetOptions = std::make_shared<parquet::WriterOptions>();
+    auto flushPolicyFactory = []() {
+      return std::make_unique<parquet::DefaultFlushPolicy>(
+          500000, 1024 * 1024 * 1024);
+    };
+    parquetOptions->flushPolicyFactory = flushPolicyFactory;
+
+    auto generator = [](int index) -> std::string {
+      return fmt::format("custom_file_{:04d}.", index);
+    };
+
+    // It will test if the sortkey and time columns are empty
+    auto plan = createCompactTableWritePlan(
+        vectors,
+        rowType_,
+        testOutputDirectory->getPath(),
+        dwio::common::FileFormat::PARQUET,
+        nullptr,
+        500, // fileSizeThreshold
+        {"c4"}, // sortKeyColumns
+        "c0", // timeColumn
+        generator);
+
+    auto results = AssertQueryBuilder(plan).copyResults(pool());
+
+    auto files = listFiles(testOutputDirectory->getPath());
+    for (const auto& file : files) {
+      std::cout << "file: " << file << std::endl;
+    }
+    EXPECT_GT(files.size(), 0)
+        << "Expected output files with null column " << nullColumnIndex;
+
+    verifyCompactOutput(testOutputDirectory->getPath(), files.size(), 3000000);
+  }
 }

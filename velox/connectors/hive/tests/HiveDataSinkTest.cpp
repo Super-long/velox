@@ -54,14 +54,31 @@ class HiveDataSinkTest : public exec::test::HiveConnectorTestBase {
     HiveBucketProperty::registerSerDe();
 
     rowType_ =
-        ROW({"c0", "c1", "c2", "c3", "c4", "c5", "c6"},
+        ROW({"c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9"},
             {BIGINT(),
              INTEGER(),
              SMALLINT(),
              REAL(),
              DOUBLE(),
-             VARCHAR(),
-             BOOLEAN()});
+             VARBINARY(),
+             BOOLEAN(),
+             VARBINARY(), // c7 - additional VARBINARY for compact sort key
+             VARBINARY(), // c8 - additional VARBINARY for compact sort key
+             VARBINARY()}); // c9 - additional VARBINARY for compact sort key
+
+    // Create a compact-specific row type with VARBINARY sort keys
+    compactRowType_ =
+        ROW({"c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9"},
+            {BIGINT(),
+             INTEGER(),
+             SMALLINT(),
+             REAL(),
+             DOUBLE(),
+             VARBINARY(),
+             BOOLEAN(),
+             VARBINARY(), // c7 - sort key 1
+             VARBINARY(), // c8 - sort key 2
+             VARBINARY()}); // c9 - sort key 3
 
     setupMemoryPools();
 
@@ -184,6 +201,75 @@ class HiveDataSinkTest : public exec::test::HiveConnectorTestBase {
         connectorConfig_);
   }
 
+  // Helper function to create HiveInsertTableHandle with CompactProperty
+  std::shared_ptr<connector::hive::HiveInsertTableHandle>
+  createHiveInsertTableHandleWithCompact(
+      const RowTypePtr& outputRowType,
+      const std::string& outputDirectoryPath,
+      const std::shared_ptr<connector::hive::CompactProperty>& compactProperty,
+      dwio::common::FileFormat fileFormat = dwio::common::FileFormat::DWRF,
+      const std::vector<std::string>& partitionedBy = {},
+      const std::shared_ptr<connector::hive::HiveBucketProperty>&
+          bucketProperty = nullptr,
+      const std::shared_ptr<dwio::common::WriterOptions>& writerOptions =
+          nullptr) {
+    std::vector<std::shared_ptr<const HiveColumnHandle>> inputColumns;
+    inputColumns.reserve(outputRowType->size());
+    for (int i = 0; i < outputRowType->size(); ++i) {
+      bool isPartitionKey =
+          std::find(
+              partitionedBy.begin(),
+              partitionedBy.end(),
+              outputRowType->nameOf(i)) != partitionedBy.end();
+      inputColumns.emplace_back(std::make_shared<HiveColumnHandle>(
+          outputRowType->nameOf(i),
+          isPartitionKey ? HiveColumnHandle::ColumnType::kPartitionKey
+                         : HiveColumnHandle::ColumnType::kRegular,
+          outputRowType->childAt(i),
+          outputRowType->childAt(i)));
+    }
+
+    auto locationHandle = makeLocationHandle(
+        outputDirectoryPath,
+        std::nullopt,
+        connector::hive::LocationHandle::TableType::kNew);
+
+    return std::make_shared<HiveInsertTableHandle>(
+        inputColumns,
+        locationHandle,
+        fileFormat,
+        bucketProperty,
+        CompressionKind::CompressionKind_ZSTD,
+        std::unordered_map<std::string, std::string>{},
+        writerOptions,
+        compactProperty);
+  }
+
+  std::shared_ptr<HiveDataSink> createDataSinkWithCompact(
+      const RowTypePtr& rowType,
+      const std::string& outputDirectoryPath,
+      const std::shared_ptr<connector::hive::CompactProperty>& compactProperty,
+      dwio::common::FileFormat fileFormat = dwio::common::FileFormat::DWRF,
+      const std::vector<std::string>& partitionedBy = {},
+      const std::shared_ptr<connector::hive::HiveBucketProperty>&
+          bucketProperty = nullptr,
+      const std::shared_ptr<dwio::common::WriterOptions>& writerOptions =
+          nullptr) {
+    return std::make_shared<HiveDataSink>(
+        rowType,
+        createHiveInsertTableHandleWithCompact(
+            rowType,
+            outputDirectoryPath,
+            compactProperty,
+            fileFormat,
+            partitionedBy,
+            bucketProperty,
+            writerOptions),
+        connectorQueryCtx_.get(),
+        CommitStrategy::kNoCommit,
+        connectorConfig_);
+  }
+
   std::vector<std::string> listFiles(const std::string& dirPath) {
     std::vector<std::string> files;
     for (auto& dirEntry : fs::recursive_directory_iterator(dirPath)) {
@@ -219,6 +305,7 @@ class HiveDataSinkTest : public exec::test::HiveConnectorTestBase {
   std::shared_ptr<memory::MemoryPool> opPool_;
   std::shared_ptr<memory::MemoryPool> connectorPool_;
   RowTypePtr rowType_;
+  RowTypePtr compactRowType_;
   std::shared_ptr<config::ConfigBase> connectorSessionProperties_ =
       std::make_shared<config::ConfigBase>(
           std::unordered_map<std::string, std::string>(),
@@ -228,6 +315,21 @@ class HiveDataSinkTest : public exec::test::HiveConnectorTestBase {
       std::make_shared<HiveConfig>(std::make_shared<config::ConfigBase>(
           std::unordered_map<std::string, std::string>()));
   std::unique_ptr<folly::IOThreadPoolExecutor> spillExecutor_;
+
+  // Helper function to create CompactProperty with fileNameGenerator for tests
+  std::shared_ptr<connector::hive::CompactProperty>
+  createCompactPropertyWithGenerator(
+      bool enabled,
+      uint64_t fileSizeThreshold,
+      const std::vector<std::string>& sortKeyColumns,
+      const std::string& timeColumn) {
+    auto generator = [](int index) -> std::string {
+      return fmt::format("compact_file_{:04d}", index);
+    };
+
+    return std::make_shared<connector::hive::CompactProperty>(
+        enabled, fileSizeThreshold, sortKeyColumns, timeColumn, generator);
+  }
 };
 
 TEST_F(HiveDataSinkTest, hiveSortingColumn) {
@@ -294,7 +396,7 @@ TEST_F(HiveDataSinkTest, hiveSortingColumn) {
 
 TEST_F(HiveDataSinkTest, hiveBucketProperty) {
   const std::vector<std::string> columns = {"a", "b", "c"};
-  const std::vector<TypePtr> types = {INTEGER(), VARCHAR(), BIGINT()};
+  const std::vector<TypePtr> types = {INTEGER(), VARBINARY(), BIGINT()};
   const std::vector<std::shared_ptr<const HiveSortingColumn>> sortedColumns = {
       std::make_shared<HiveSortingColumn>("d", core::SortOrder{false, false}),
       std::make_shared<HiveSortingColumn>("e", core::SortOrder{false, false}),
@@ -362,7 +464,7 @@ TEST_F(HiveDataSinkTest, hiveBucketProperty) {
        "\t\tb\n"
        "\tBucket Types:\n"
        "\t\tINTEGER\n"
-       "\t\tVARCHAR\n"
+       "\t\tVARBINARY\n"
        "]\n"},
       {HiveBucketProperty::Kind::kPrestoNative,
        {columns[0]},
@@ -379,7 +481,7 @@ TEST_F(HiveDataSinkTest, hiveBucketProperty) {
        {{sortedColumns[0]}},
        false,
        "",
-       "\nHiveBucketProperty[<PRESTO_NATIVE 4>\n\tBucket Columns:\n\t\ta\n\t\tb\n\tBucket Types:\n\t\tINTEGER\n\t\tVARCHAR\n\tSortedBy Columns:\n\t\t[COLUMN[d] ORDER[DESC NULLS LAST]]\n]\n"},
+       "\nHiveBucketProperty[<PRESTO_NATIVE 4>\n\tBucket Columns:\n\t\ta\n\t\tb\n\tBucket Types:\n\t\tINTEGER\n\t\tVARBINARY\n\tSortedBy Columns:\n\t\t[COLUMN[d] ORDER[DESC NULLS LAST]]\n]\n"},
       {HiveBucketProperty::Kind::kPrestoNative,
        {columns[0]},
        {types[0]},
@@ -442,7 +544,7 @@ TEST_F(HiveDataSinkTest, hiveBucketProperty) {
        "\t\tb\n"
        "\tBucket Types:\n"
        "\t\tINTEGER\n"
-       "\t\tVARCHAR\n"
+       "\t\tVARBINARY\n"
        "]\n"},
       {HiveBucketProperty::Kind::kHiveCompatible,
        {columns[0]},
@@ -459,7 +561,7 @@ TEST_F(HiveDataSinkTest, hiveBucketProperty) {
        {{sortedColumns[0]}},
        false,
        "",
-       "\nHiveBucketProperty[<HIVE_COMPATIBLE 4>\n\tBucket Columns:\n\t\ta\n\t\tb\n\tBucket Types:\n\t\tINTEGER\n\t\tVARCHAR\n\tSortedBy Columns:\n\t\t[COLUMN[d] ORDER[DESC NULLS LAST]]\n]\n"},
+       "\nHiveBucketProperty[<HIVE_COMPATIBLE 4>\n\tBucket Columns:\n\t\ta\n\t\tb\n\tBucket Types:\n\t\tINTEGER\n\t\tVARBINARY\n\tSortedBy Columns:\n\t\t[COLUMN[d] ORDER[DESC NULLS LAST]]\n]\n"},
       {HiveBucketProperty::Kind::kHiveCompatible,
        {columns[0]},
        {types[0]},
@@ -1118,7 +1220,7 @@ TEST_F(HiveDataSinkTest, insertTableHandleToString) {
       HiveBucketProperty::Kind::kHiveCompatible,
       numBuckets,
       std::vector<std::string>{"c5"},
-      std::vector<TypePtr>{VARCHAR()},
+      std::vector<TypePtr>{VARBINARY()},
       std::vector<std::shared_ptr<const HiveSortingColumn>>{
           std::make_shared<HiveSortingColumn>(
               "c5", core::SortOrder{false, false})});
@@ -1130,7 +1232,7 @@ TEST_F(HiveDataSinkTest, insertTableHandleToString) {
       bucketProperty);
   ASSERT_EQ(
       insertTableHandle->toString(),
-      "HiveInsertTableHandle [dwrf zstd], [inputColumns: [ HiveColumnHandle [name: c0, columnType: Regular, dataType: BIGINT, requiredSubfields: [ ]] HiveColumnHandle [name: c1, columnType: Regular, dataType: INTEGER, requiredSubfields: [ ]] HiveColumnHandle [name: c2, columnType: Regular, dataType: SMALLINT, requiredSubfields: [ ]] HiveColumnHandle [name: c3, columnType: Regular, dataType: REAL, requiredSubfields: [ ]] HiveColumnHandle [name: c4, columnType: Regular, dataType: DOUBLE, requiredSubfields: [ ]] HiveColumnHandle [name: c5, columnType: PartitionKey, dataType: VARCHAR, requiredSubfields: [ ]] HiveColumnHandle [name: c6, columnType: PartitionKey, dataType: BOOLEAN, requiredSubfields: [ ]] ], locationHandle: LocationHandle [targetPath: /path/to/test, writePath: /path/to/test, tableType: kNew,, bucketProperty: \nHiveBucketProperty[<HIVE_COMPATIBLE 4>\n\tBucket Columns:\n\t\tc5\n\tBucket Types:\n\t\tVARCHAR\n\tSortedBy Columns:\n\t\t[COLUMN[c5] ORDER[DESC NULLS LAST]]\n]\n]");
+      "HiveInsertTableHandle [dwrf zstd], [inputColumns: [ HiveColumnHandle [name: c0, columnType: Regular, dataType: BIGINT, requiredSubfields: [ ]] HiveColumnHandle [name: c1, columnType: Regular, dataType: INTEGER, requiredSubfields: [ ]] HiveColumnHandle [name: c2, columnType: Regular, dataType: SMALLINT, requiredSubfields: [ ]] HiveColumnHandle [name: c3, columnType: Regular, dataType: REAL, requiredSubfields: [ ]] HiveColumnHandle [name: c4, columnType: Regular, dataType: DOUBLE, requiredSubfields: [ ]] HiveColumnHandle [name: c5, columnType: PartitionKey, dataType: VARBINARY, requiredSubfields: [ ]] HiveColumnHandle [name: c6, columnType: PartitionKey, dataType: BOOLEAN, requiredSubfields: [ ]] HiveColumnHandle [name: c7, columnType: Regular, dataType: VARBINARY, requiredSubfields: [ ]] HiveColumnHandle [name: c8, columnType: Regular, dataType: VARBINARY, requiredSubfields: [ ]] HiveColumnHandle [name: c9, columnType: Regular, dataType: VARBINARY, requiredSubfields: [ ]] ], locationHandle: LocationHandle [targetPath: /path/to/test, writePath: /path/to/test, tableType: kNew,, bucketProperty: \nHiveBucketProperty[<HIVE_COMPATIBLE 4>\n\tBucket Columns:\n\t\tc5\n\tBucket Types:\n\t\tVARBINARY\n\tSortedBy Columns:\n\t\t[COLUMN[c5] ORDER[DESC NULLS LAST]]\n]\n]");
 }
 
 #ifdef VELOX_ENABLE_PARQUET
@@ -1207,14 +1309,570 @@ TEST_F(HiveDataSinkTest, flushPolicyWithDWRF) {
   ASSERT_EQ(reader->getRowsPerStripe()[0], 500);
 }
 
+// Compact Mode Tests
+TEST_F(HiveDataSinkTest, compactProperty) {
+  struct {
+    bool enabled;
+    uint64_t fileSizeThreshold;
+    std::vector<std::string> sortKeyColumns;
+    std::string timeColumn;
+    bool hasCustomGenerator;
+    std::string expectedToString;
+
+    std::string debugString() const {
+      return fmt::format(
+          "enabled {} fileSizeThreshold {} sortKeyColumns [{}] timeColumn {} hasCustomGenerator {} expectedToString {}",
+          enabled,
+          fileSizeThreshold,
+          folly::join(", ", sortKeyColumns),
+          timeColumn,
+          hasCustomGenerator,
+          expectedToString);
+    }
+  } testSettings[] = {
+      {true,
+       1024,
+       {"col1", "col2"},
+       "time_col",
+       false,
+       "CompactProperty[enabled=true, fileSizeThreshold=1024, sortKeyColumns=[col1, col2], timeColumn=time_col]"},
+      {false,
+       2048,
+       {"col1"},
+       "time_col",
+       false,
+       "CompactProperty[enabled=false, fileSizeThreshold=2048, sortKeyColumns=[col1], timeColumn=time_col]"},
+      {true,
+       4096,
+       {},
+       "",
+       false,
+       "CompactProperty[enabled=true, fileSizeThreshold=4096, sortKeyColumns=[], timeColumn=]"},
+      {true,
+       8192,
+       {"col1", "col2", "col3"},
+       "timestamp",
+       false,
+       "CompactProperty[enabled=true, fileSizeThreshold=8192, sortKeyColumns=[col1, col2, col3], timeColumn=timestamp]"},
+  };
+
+  for (const auto& testData : testSettings) {
+    SCOPED_TRACE(testData.debugString());
+
+    std::shared_ptr<connector::hive::CompactProperty> property;
+    if (testData.hasCustomGenerator) {
+      auto generator = [](int index) {
+        return fmt::format("custom_{}.parquet", index);
+      };
+      property = std::make_shared<connector::hive::CompactProperty>(
+          testData.enabled,
+          testData.fileSizeThreshold,
+          testData.sortKeyColumns,
+          testData.timeColumn,
+          generator);
+    } else {
+      property = std::make_shared<connector::hive::CompactProperty>(
+          testData.enabled,
+          testData.fileSizeThreshold,
+          testData.sortKeyColumns,
+          testData.timeColumn);
+    }
+
+    EXPECT_EQ(property->enabled(), testData.enabled);
+    EXPECT_EQ(property->fileSizeThreshold(), testData.fileSizeThreshold);
+    EXPECT_EQ(property->sortKeyColumns(), testData.sortKeyColumns);
+    EXPECT_EQ(property->timeColumn(), testData.timeColumn);
+    EXPECT_EQ(
+        property->hasCustomFileNameGenerator(), testData.hasCustomGenerator);
+    EXPECT_EQ(property->toString(), testData.expectedToString);
+  }
+}
+
+TEST_F(HiveDataSinkTest, compactPropertySerialization) {
+  // Test serialization and deserialization of CompactProperty
+  auto original = std::make_shared<connector::hive::CompactProperty>(
+      true, // enabled
+      1024 * 1024, // 1MB threshold
+      std::vector<std::string>{"col1", "col2", "col3"}, // sort key columns
+      "timestamp" // time column
+  );
+
+  // Serialize
+  auto serialized = original->serialize();
+
+  // Verify serialized structure
+  EXPECT_EQ(serialized["name"].asString(), "CompactProperty");
+  EXPECT_EQ(serialized["enabled"].asBool(), true);
+  EXPECT_EQ(serialized["fileSizeThreshold"].asInt(), 1024 * 1024);
+  EXPECT_EQ(serialized["timeColumn"].asString(), "timestamp");
+  EXPECT_FALSE(serialized["hasCustomFileNameGenerator"].asBool());
+
+  std::cout << "serialized: " << folly::toJson(serialized) << std::endl;
+
+  // Deserialize
+  auto deserialized =
+      connector::hive::CompactProperty::deserialize(serialized, nullptr);
+
+  // Verify all properties match
+  EXPECT_EQ(original->enabled(), deserialized->enabled());
+  EXPECT_EQ(original->fileSizeThreshold(), deserialized->fileSizeThreshold());
+  EXPECT_EQ(original->sortKeyColumns(), deserialized->sortKeyColumns());
+  EXPECT_EQ(original->timeColumn(), deserialized->timeColumn());
+
+  // Custom generators should not be serialized
+  EXPECT_FALSE(deserialized->hasCustomFileNameGenerator());
+}
+
+TEST_F(HiveDataSinkTest, compactPropertyWithCustomGenerator) {
+  auto generator = [](int index) -> std::string {
+    return fmt::format("custom_file_{:04d}.dwrf", index);
+  };
+
+  auto property = std::make_shared<connector::hive::CompactProperty>(
+      true, // enabled
+      512, // threshold
+      std::vector<std::string>{"col1"}, // sort key columns
+      "time_col", // time column
+      generator);
+
+  EXPECT_TRUE(property->hasCustomFileNameGenerator());
+  EXPECT_EQ(property->fileNameGenerator()(5), "custom_file_0005.dwrf");
+
+  // Serialization should not include the custom generator
+  auto serialized = property->serialize();
+  auto deserialized =
+      connector::hive::CompactProperty::deserialize(serialized, nullptr);
+  EXPECT_FALSE(deserialized->hasCustomFileNameGenerator());
+}
+
+TEST_F(HiveDataSinkTest, compactModeBasic) {
+  setupMemoryPools();
+
+  auto compactProperty = createCompactPropertyWithGenerator(
+      true, // enabled
+      5000, // fileSizeThreshold: Set to 5KB to work with our small flush policy
+      std::vector<std::string>{
+          "c5", "c7", "c8", "c9"}, // sort key columns (VARBINARY)
+      "c0" // time column (BIGINT)
+  );
+
+  // Create custom Parquet writer options with small flush policy for testing
+  auto parquetOptions = std::make_shared<parquet::WriterOptions>();
+
+  // Create a custom flush policy with small thresholds for testing
+  // This ensures that RowGroups are flushed frequently, updating ioStats
+  auto flushPolicyFactory = []() {
+    // Use small thresholds: 100 rows or 1KB to trigger frequent flushes
+    return std::make_unique<parquet::DefaultFlushPolicy>(
+        100, // rowsInRowGroup: very small for testing
+        1024 // bytesInRowGroup: 1KB, very small for testing
+    );
+  };
+  parquetOptions->flushPolicyFactory = flushPolicyFactory;
+
+  auto dataSink = createDataSinkWithCompact(
+      compactRowType_, // Use compact-specific row type
+      "/tmp/test",
+      compactProperty,
+      dwio::common::FileFormat::PARQUET, // Use Parquet format
+      {}, // partitionedBy
+      nullptr, // bucketProperty
+      parquetOptions); // Custom writer options with small flush policy
+  EXPECT_TRUE(dataSink != nullptr);
+
+  // Create test vectors - use moderate size to trigger multiple flushes
+  auto vectors = createVectors(150, 5); // 5 vectors of 150 rows each
+
+  // Append data - should trigger multiple file switches due to small threshold
+  for (size_t i = 0; i < vectors.size(); ++i) {
+    std::cout << "=== Appending vector " << (i + 1) << " with "
+              << vectors[i]->size() << " rows ===" << std::endl;
+    dataSink->appendData(vectors[i]);
+
+    // Check stats after each append
+    auto stats = dataSink->stats();
+    std::cout << "After vector " << (i + 1)
+              << ": numWrittenBytes=" << stats.numWrittenBytes
+              << ", numWrittenFiles=" << stats.numWrittenFiles << std::endl;
+  }
+
+  EXPECT_TRUE(dataSink->finish());
+  auto result = dataSink->close();
+
+  std::cout << "=== Final Results ===" << std::endl;
+  std::cout << "Number of output files: " << result.size() << std::endl;
+
+  for (size_t i = 0; i < result.size(); ++i) {
+    std::cout << "File " << i << " partition update:" << std::endl;
+    std::cout << result[i] << std::endl;
+  }
+
+  // Should have created multiple partition updates due to file switches
+  EXPECT_GT(result.size(), 1)
+      << "Should create multiple files with small threshold, got "
+      << result.size() << " files";
+
+  // Verify partition updates contain compact stats
+  for (size_t i = 0; i < result.size(); ++i) {
+    auto updateJson = folly::parseJson(result[i]);
+    EXPECT_TRUE(updateJson.count("compactStats") > 0)
+        << "Partition update should contain compact stats";
+
+    auto fileWriteInfo = updateJson["fileWriteInfos"];
+    EXPECT_TRUE(fileWriteInfo.count("fileSize") > 0);
+    EXPECT_TRUE(fileWriteInfo.count("targetFileName") > 0);
+    EXPECT_TRUE(fileWriteInfo.count("writeFileName") > 0);
+    auto targetFileName = fileWriteInfo["targetFileName"].asString();
+    auto writeFileName = fileWriteInfo["writeFileName"].asString();
+    EXPECT_EQ(targetFileName, writeFileName);
+    EXPECT_EQ(targetFileName, fmt::format("compact_file_{:04d}.parquet", i));
+    EXPECT_EQ(writeFileName, fmt::format("compact_file_{:04d}.parquet", i));
+
+    EXPECT_TRUE(updateJson.count("rowCount") > 0)
+        << "Partition update should contain rowCount";
+    auto rowCount = updateJson["rowCount"];
+    EXPECT_TRUE(rowCount.isInt());
+    EXPECT_GE(rowCount.asInt(), 150); // 150 rows per vector
+    std::cout << "rowCount: " << rowCount.asInt() << std::endl;
+
+    auto partIndex = updateJson["part_index"];
+    EXPECT_TRUE(partIndex.isInt());
+    EXPECT_EQ(partIndex.asInt(), i);
+
+    auto compactStats = updateJson["compactStats"];
+    EXPECT_TRUE(compactStats.count("sortKeyStats") > 0);
+    EXPECT_TRUE(compactStats.count("timeColumnStats") > 0);
+    EXPECT_TRUE(compactStats.count("sortKeyColumns") > 0);
+    EXPECT_TRUE(compactStats.count("timeColumn") > 0);
+
+    // Verify new sortKeyStats structure (min/max arrays)
+    auto sortKeyStats = compactStats["sortKeyStats"];
+    if (!sortKeyStats.empty()) {
+      EXPECT_TRUE(sortKeyStats.count("min") > 0)
+          << "Should have min array in sortKeyStats";
+      EXPECT_TRUE(sortKeyStats.count("max") > 0)
+          << "Should have max array in sortKeyStats";
+
+      auto minArray = sortKeyStats["min"];
+      auto maxArray = sortKeyStats["max"];
+      EXPECT_TRUE(minArray.isArray()) << "min should be an array";
+      EXPECT_TRUE(maxArray.isArray()) << "max should be an array";
+      EXPECT_EQ(minArray.size(), maxArray.size())
+          << "min and max arrays should have same size";
+      EXPECT_EQ(minArray.size(), 4);
+      EXPECT_EQ(maxArray.size(), 4);
+    }
+  }
+}
+
+TEST_F(HiveDataSinkTest, compactModeDisabled) {
+  setupMemoryPools();
+
+  auto compactProperty = createCompactPropertyWithGenerator(
+      false, // disabled
+      1024, // threshold (should be ignored)
+      std::vector<std::string>{
+          "c7", "c8", "c9"}, // sort key columns (should be ignored)
+      "c0" // time column (should be ignored)
+  );
+
+  auto dataSink = createDataSinkWithCompact(
+      compactRowType_, // Use compact-specific row type
+      "/tmp/test",
+      compactProperty,
+      dwio::common::FileFormat::PARQUET); // Use Parquet format
+
+  auto vectors = createVectors(100, 3);
+  for (const auto& vector : vectors) {
+    dataSink->appendData(vector);
+  }
+
+  EXPECT_TRUE(dataSink->finish());
+  auto result = dataSink->close();
+
+  // Should create only one file since compact mode is disabled
+  EXPECT_EQ(result.size(), 1)
+      << "Should create single file when compact mode is disabled";
+
+  // Should not contain compact stats when disabled
+  auto updateJson = folly::parseJson(result[0]);
+  EXPECT_FALSE(updateJson.count("compactStats") > 0)
+      << "Should not contain compact stats when compact mode is disabled";
+}
+
+TEST_F(HiveDataSinkTest, compactModeWithLargeThreshold) {
+  setupMemoryPools();
+
+  auto compactProperty = createCompactPropertyWithGenerator(
+      true, // enabled
+      10 * 1024 * 1024, // 10MB - large threshold
+      std::vector<std::string>{"c7", "c8", "c9"}, // sort key columns
+      "c0" // time column
+  );
+
+  auto dataSink = createDataSinkWithCompact(
+      compactRowType_, // Use compact-specific row type
+      "/tmp/test",
+      compactProperty,
+      dwio::common::FileFormat::PARQUET); // Use Parquet format
+
+  auto vectors = createVectors(100, 3);
+  for (const auto& vector : vectors) {
+    dataSink->appendData(vector);
+  }
+
+  EXPECT_TRUE(dataSink->finish());
+  auto result = dataSink->close();
+
+  // Should create only one file due to large threshold
+  EXPECT_EQ(result.size(), 1)
+      << "Should create single file with large threshold";
+
+  // Should contain compact stats
+  auto updateJson = folly::parseJson(result[0]);
+  EXPECT_TRUE(updateJson.count("compactStats") > 0)
+      << "Should contain compact stats even with single file";
+}
+
+TEST_F(HiveDataSinkTest, compactModeWithEmptySortKeys) {
+  setupMemoryPools();
+
+  auto compactProperty = createCompactPropertyWithGenerator(
+      true, // enabled
+      1024, // small threshold
+      std::vector<std::string>{}, // empty sort key columns
+      "c0" // time column
+  );
+
+
+  EXPECT_THROW(
+      {
+        auto dataSink = createDataSinkWithCompact(
+            compactRowType_, // Use compact-specific row type
+            "/tmp/test",
+            compactProperty,
+            dwio::common::FileFormat::PARQUET); // Use Parquet format
+      },
+      VeloxUserError);
+}
+
+TEST_F(HiveDataSinkTest, compactModeWithEmptyTimeColumn) {
+  setupMemoryPools();
+
+  auto compactProperty = createCompactPropertyWithGenerator(
+      true, // enabled
+      1024, // small threshold
+      std::vector<std::string>{"c7", "c8", "c9"}, // sort key columns
+      "" // empty time column
+  );
+
+  EXPECT_THROW(
+      {
+        auto dataSink = createDataSinkWithCompact(
+            compactRowType_, // Use compact-specific row type
+            "/tmp/test",
+            compactProperty,
+            dwio::common::FileFormat::PARQUET); // Use Parquet format
+      },
+      VeloxUserError);
+
+}
+
+TEST_F(HiveDataSinkTest, compactModeInvalidSortKeyColumn) {
+  setupMemoryPools();
+
+  auto compactProperty = createCompactPropertyWithGenerator(
+      true, // enabled
+      1024, // threshold
+      std::vector<std::string>{"invalid_column"}, // invalid sort key column
+      "c0" // time column
+  );
+
+  // Should throw when creating data sink due to invalid column
+  EXPECT_THROW(
+      {
+        auto dataSink = createDataSinkWithCompact(
+            compactRowType_, // Use compact-specific row type
+            "/tmp/test",
+            compactProperty,
+            dwio::common::FileFormat::PARQUET); // Use Parquet format
+      },
+      std::exception)
+      << "Should throw for invalid sort key column";
+}
+
+TEST_F(HiveDataSinkTest, compactModeInvalidTimeColumn) {
+  setupMemoryPools();
+
+  auto compactProperty = createCompactPropertyWithGenerator(
+      true, // enabled
+      1024, // threshold
+      std::vector<std::string>{"c7", "c8", "c9"}, // sort key columns
+      "invalid_time_column" // invalid time column
+  );
+
+  // Should throw when creating data sink due to invalid column
+  EXPECT_THROW(
+      {
+        auto dataSink = createDataSinkWithCompact(
+            compactRowType_, // Use compact-specific row type
+            "/tmp/test",
+            compactProperty,
+            dwio::common::FileFormat::PARQUET); // Use Parquet format
+      },
+      std::exception)
+      << "Should throw for invalid time column";
+}
+
+TEST_F(HiveDataSinkTest, compactModeWithPartitions) {
+  setupMemoryPools();
+
+  // Create partitioned table setup
+  auto partitionedRowType =
+      ROW({"c0", "c1", "partition_key"}, {BIGINT(), INTEGER(), VARBINARY()});
+
+  std::vector<std::string> partitionedBy = {"partition_key"};
+
+  auto compactProperty = std::make_shared<connector::hive::CompactProperty>(
+      true, // enabled
+      1024, // threshold
+      std::vector<std::string>{"c0"}, // sort key columns
+      "c1" // time column
+  );
+
+  // Should throw when trying to use compact mode with partitioned table
+  EXPECT_THROW(
+      {
+        auto dataSink = createDataSinkWithCompact(
+            partitionedRowType,
+            "/tmp/test",
+            compactProperty,
+            dwio::common::FileFormat::DWRF,
+            partitionedBy); // partitioned table
+      },
+      std::exception)
+      << "Should throw when using compact mode with partitioned tables";
+}
+
+TEST_F(HiveDataSinkTest, compactModeWithBuckets) {
+  setupMemoryPools();
+
+  // Create bucketed table setup
+  auto bucketProperty = std::make_shared<HiveBucketProperty>(
+      HiveBucketProperty::Kind::kHiveCompatible,
+      4, // bucket count
+      std::vector<std::string>{"c0"}, // bucketed by
+      std::vector<TypePtr>{BIGINT()}, // bucket types
+      std::vector<std::shared_ptr<const HiveSortingColumn>>{});
+
+  auto compactProperty = std::make_shared<connector::hive::CompactProperty>(
+      true, // enabled
+      1024, // threshold
+      std::vector<std::string>{"c0"}, // sort key columns
+      "c1" // time column
+  );
+
+  // Should throw when trying to use compact mode with bucketed table
+  EXPECT_THROW(
+      {
+        auto dataSink = createDataSinkWithCompact(
+            rowType_,
+            "/tmp/test",
+            compactProperty,
+            dwio::common::FileFormat::DWRF,
+            {}, // partitionedBy
+            bucketProperty); // bucketed table
+      },
+      std::exception)
+      << "Should throw when using compact mode with bucketed tables";
+}
+
+TEST_F(HiveDataSinkTest, compactModeFileStatistics) {
+  setupMemoryPools();
+
+  auto compactProperty = createCompactPropertyWithGenerator(
+      true, // enabled
+      512, // small threshold to trigger multiple files - reduced for better
+           // testing
+      std::vector<std::string>{"c7", "c8", "c9"}, // multiple sort key columns
+      "c0" // time column
+  );
+
+  // Create custom Parquet writer options with small flush policy for testing
+  auto parquetOptions = std::make_shared<parquet::WriterOptions>();
+  auto flushPolicyFactory = []() {
+    return std::make_unique<parquet::DefaultFlushPolicy>(100, 1024);
+  };
+  parquetOptions->flushPolicyFactory = flushPolicyFactory;
+
+  auto dataSink = createDataSinkWithCompact(
+      compactRowType_, // Use compact-specific row type
+      "/tmp/test",
+      compactProperty,
+      dwio::common::FileFormat::PARQUET, // Use Parquet format
+      {}, // partitionedBy
+      nullptr, // bucketProperty
+      parquetOptions); // Custom writer options with small flush policy
+
+  auto vectors = createVectors(150, 4); // Increased data size
+  for (const auto& vector : vectors) {
+    dataSink->appendData(vector);
+  }
+
+  EXPECT_TRUE(dataSink->finish());
+  auto result = dataSink->close();
+
+  // Verify each partition update contains proper statistics
+  for (const auto& partitionUpdate : result) {
+    auto updateJson = folly::parseJson(partitionUpdate);
+    EXPECT_TRUE(updateJson.count("compactStats") > 0);
+
+    auto compactStats = updateJson["compactStats"];
+
+    // Verify sort key statistics
+    auto sortKeyStats = compactStats["sortKeyStats"];
+    for (const auto& sortKeyColumn : compactProperty->sortKeyColumns()) {
+      if (sortKeyStats.count(sortKeyColumn) > 0) {
+        auto columnStats = sortKeyStats[sortKeyColumn];
+        EXPECT_TRUE(columnStats.count("min") > 0)
+            << "Should have min value for sort key column: " << sortKeyColumn;
+        EXPECT_TRUE(columnStats.count("max") > 0)
+            << "Should have max value for sort key column: " << sortKeyColumn;
+      }
+    }
+
+    // Verify time column statistics
+    if (!compactProperty->timeColumn().empty()) {
+      auto timeColumnStats = compactStats["timeColumnStats"];
+      if (!timeColumnStats.empty()) {
+        EXPECT_TRUE(timeColumnStats.count("min") > 0)
+            << "Should have min value for time column";
+        EXPECT_TRUE(timeColumnStats.count("max") > 0)
+            << "Should have max value for time column";
+      }
+    }
+
+    // Verify metadata
+    EXPECT_EQ(
+        compactStats["sortKeyColumns"],
+        ISerializable::serialize(compactProperty->sortKeyColumns()));
+    EXPECT_EQ(
+        compactStats["timeColumn"].asString(), compactProperty->timeColumn());
+  }
+}
+
 } // namespace
 } // namespace facebook::velox::connector::hive
 
-// This main is needed for some tests on linux.
 int main(int argc, char** argv) {
   testing::InitGoogleTest(&argc, argv);
   // Signal handler required for ThreadDebugInfoTest
   facebook::velox::process::addDefaultFatalSignalHandler();
+
   folly::Init init{&argc, &argv, false};
+
+  // Register SerDe for CompactProperty
+  facebook::velox::connector::hive::CompactProperty::registerSerDe();
+
   return RUN_ALL_TESTS();
 }

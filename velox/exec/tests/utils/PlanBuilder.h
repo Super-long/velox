@@ -456,6 +456,28 @@ class PlanBuilder {
       const std::vector<std::string>& aggregates = {},
       const std::shared_ptr<dwio::common::WriterOptions>& options = nullptr);
 
+  /// Add a TableWriteNode to write to a Hive table with compact support and
+  /// custom file name generation.
+  ///
+  /// @param outputDirectoryPath Path to a directory to write data to.
+  /// @param fileFormat File format to use for the written data.
+  /// @param connectorId Name used to register the connector.
+  /// @param fileSizeThreshold File size threshold for triggering compaction.
+  /// @param sortKeyColumns List of sort key columns for compaction.
+  /// @param timeColumn Optional time column for temporal ordering.
+  /// @param fileNameGenerator Function to generate custom file names, takes
+  /// @param compactProperty Compact property for the table.
+  /// file index as parameter and returns the file name.
+  PlanBuilder& tableWrite(
+      const std::string& outputDirectoryPath,
+      const dwio::common::FileFormat fileFormat,
+      const std::string_view& connectorId,
+      uint64_t fileSizeThreshold,
+      const std::vector<std::string>& sortKeyColumns,
+      const std::string& timeColumn,
+      std::function<std::string(int)> fileNameGenerator = nullptr,
+      const std::shared_ptr<dwio::common::WriterOptions>& options = nullptr);
+
   /// Adds a TableWriteNode to write all input columns into a sorted bucket Hive
   /// table without compression.
   ///
@@ -473,6 +495,7 @@ class PlanBuilder {
   /// @param outputFileName Optional file name of the output. If specified
   /// (non-empty), use it instead of generating the file name in Velox. Should
   /// only be specified in non-bucketing write.
+  /// @param compactProperty Compact property for the table.
   PlanBuilder& tableWrite(
       const std::string& outputDirectoryPath,
       const std::vector<std::string>& partitionBy,
@@ -486,7 +509,8 @@ class PlanBuilder {
       const std::string_view& connectorId = kHiveDefaultConnectorId,
       const std::unordered_map<std::string, std::string>& serdeParameters = {},
       const std::shared_ptr<dwio::common::WriterOptions>& options = nullptr,
-      const std::string& outputFileName = "");
+      const std::string& outputFileName = "",
+      const std::shared_ptr<connector::hive::CompactProperty>& compactProperty = nullptr);
 
   /// Add a TableWriteMergeNode.
   PlanBuilder& tableWriteMerge(

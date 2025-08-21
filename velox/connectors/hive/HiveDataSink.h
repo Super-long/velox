@@ -194,6 +194,7 @@ FOLLY_ALWAYS_INLINE std::ostream& operator<<(
 
 class HiveInsertTableHandle;
 using HiveInsertTableHandlePtr = std::shared_ptr<HiveInsertTableHandle>;
+class CompactProperty;
 
 /// Represents a request for Hive write.
 class HiveInsertTableHandle : public ConnectorInsertTableHandle {
@@ -207,14 +208,16 @@ class HiveInsertTableHandle : public ConnectorInsertTableHandle {
       std::optional<common::CompressionKind> compressionKind = {},
       const std::unordered_map<std::string, std::string>& serdeParameters = {},
       const std::shared_ptr<dwio::common::WriterOptions>& writerOptions =
-          nullptr)
+          nullptr,
+      std::shared_ptr<const CompactProperty> compactProperty = nullptr)
       : inputColumns_(std::move(inputColumns)),
         locationHandle_(std::move(locationHandle)),
         tableStorageFormat_(tableStorageFormat),
         bucketProperty_(std::move(bucketProperty)),
         compressionKind_(compressionKind),
         serdeParameters_(serdeParameters),
-        writerOptions_(writerOptions) {
+        writerOptions_(writerOptions),
+        compactProperty_(std::move(compactProperty)) {
     if (compressionKind.has_value()) {
       VELOX_CHECK(
           compressionKind.value() != common::CompressionKind_MAX,
@@ -249,6 +252,10 @@ class HiveInsertTableHandle : public ConnectorInsertTableHandle {
     return writerOptions_;
   }
 
+  const std::shared_ptr<const CompactProperty>& compactProperty() const {
+    return compactProperty_;
+  }
+
   bool supportsMultiThreading() const override {
     return true;
   }
@@ -277,6 +284,7 @@ class HiveInsertTableHandle : public ConnectorInsertTableHandle {
   const std::optional<common::CompressionKind> compressionKind_;
   const std::unordered_map<std::string, std::string> serdeParameters_;
   const std::shared_ptr<dwio::common::WriterOptions> writerOptions_;
+  const std::shared_ptr<const CompactProperty> compactProperty_;
 };
 
 /// Parameters for Hive writers.
@@ -384,6 +392,98 @@ struct HiveWriterInfo {
   const std::shared_ptr<memory::MemoryPool> sinkPool;
   const std::shared_ptr<memory::MemoryPool> sortPool;
   int64_t numWrittenRows = 0;
+};
+
+/// Properties for compact mode operation.
+class CompactProperty : public ISerializable {
+ public:
+  CompactProperty(
+      bool enabled,
+      uint64_t fileSizeThreshold,
+      const std::vector<std::string>& sortKeyColumns,
+      const std::string& timeColumn)
+      : enabled_(enabled),
+        fileSizeThreshold_(fileSizeThreshold),
+        sortKeyColumns_(sortKeyColumns),
+        timeColumn_(timeColumn),
+        fileNameGenerator_(nullptr) {}
+
+  CompactProperty(
+      bool enabled,
+      uint64_t fileSizeThreshold,
+      const std::vector<std::string>& sortKeyColumns,
+      const std::string& timeColumn,
+      std::function<std::string(int)> fileNameGenerator)
+      : enabled_(enabled),
+        fileSizeThreshold_(fileSizeThreshold),
+        sortKeyColumns_(sortKeyColumns),
+        timeColumn_(timeColumn),
+        fileNameGenerator_(std::move(fileNameGenerator)) {}
+
+  bool enabled() const {
+    return enabled_;
+  }
+
+  uint64_t fileSizeThreshold() const {
+    return fileSizeThreshold_;
+  }
+
+  const std::vector<std::string>& sortKeyColumns() const {
+    return sortKeyColumns_;
+  }
+
+  const std::string& timeColumn() const {
+    return timeColumn_;
+  }
+
+  const std::function<std::string(int)>& fileNameGenerator() const {
+    return fileNameGenerator_;
+  }
+
+  bool hasCustomFileNameGenerator() const {
+    return fileNameGenerator_ != nullptr;
+  }
+
+  folly::dynamic serialize() const override;
+
+  static std::shared_ptr<CompactProperty> deserialize(
+      const folly::dynamic& obj,
+      void* context);
+
+  std::string toString() const;
+
+  static void registerSerDe();
+
+ private:
+  const bool enabled_;
+  const uint64_t fileSizeThreshold_;
+  const std::vector<std::string> sortKeyColumns_;
+  const std::string timeColumn_;
+  const std::function<std::string(int)> fileNameGenerator_;
+};
+
+/// Statistics for each output file in compact mode.
+struct CompactFileStats {
+  /// The minimum and maximum values for sort key columns (VARCHAR type).
+  /// Indexed by sort key column order, not by name.
+  std::vector<std::string> sortKeyMinValues;
+  std::vector<std::string> sortKeyMaxValues;
+  bool sortKeyInitialized{
+      false}; // Flag to track if sort key min values are set
+
+  /// The minimum and maximum values for the time column (BIGINT type).
+  int64_t timeColumnMinValue{std::numeric_limits<int64_t>::max()};
+  int64_t timeColumnMaxValue{std::numeric_limits<int64_t>::min()};
+
+  /// Number of rows written to this file.
+  int64_t numRows = 0;
+
+  /// Size of the file in bytes.
+  uint64_t fileSize = 0;
+
+  /// File path information.
+  std::string targetFileName;
+  std::string writeFileName;
 };
 
 /// Identifies a hive writer.
@@ -583,6 +683,24 @@ class HiveDataSink : public DataSink {
 
   void closeInternal();
 
+  // Compact mode related methods.
+  bool isCompactMode() const;
+
+  bool shouldSwitchFile() const;
+
+  void switchToNewFile();
+
+  void updateFileStats(size_t writerIndex, const RowVectorPtr& input);
+
+  void collectSortKeyColumnStats(
+      const RowVectorPtr& input,
+      CompactFileStats& stats);
+
+  void collectTimeColumnStats(
+      const RowVectorPtr& input,
+      column_index_t columnIndex,
+      CompactFileStats& stats);
+
   const RowTypePtr inputType_;
   const std::shared_ptr<const HiveInsertTableHandle> insertTableHandle_;
   const ConnectorQueryCtx* const connectorQueryCtx_;
@@ -599,6 +717,25 @@ class HiveDataSink : public DataSink {
   const std::shared_ptr<dwio::common::WriterFactory> writerFactory_;
   const common::SpillConfig* const spillConfig_;
   const uint64_t sortWriterFinishTimeSliceLimitMs_{0};
+
+  // Compact mode configuration.
+  const bool compactModeEnabled_;
+  const uint64_t compactFileSizeThreshold_;
+  const std::vector<std::string> compactSortKeyColumns_;
+  const std::string compactTimeColumn_;
+
+  // Column indices for compact mode statistics collection.
+  std::vector<column_index_t> compactSortKeyColumnIndices_;
+  column_index_t compactTimeColumnIndex_{0};
+
+  // Current active writer index in compact mode.
+  uint32_t currentWriterIndex_{0};
+
+  // Statistics for each output file in compact mode.
+  std::vector<CompactFileStats> compactFileStats_;
+
+  // Custom file name generator for compact mode.
+  std::function<std::string(int)> customFileNameGenerator_;
 
   std::vector<column_index_t> sortColumnIndices_;
   std::vector<CompareFlags> sortCompareFlags_;

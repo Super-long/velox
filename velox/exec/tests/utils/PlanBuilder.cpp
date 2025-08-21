@@ -16,6 +16,7 @@
 
 #include "velox/exec/tests/utils/PlanBuilder.h"
 #include "velox/connectors/hive/HiveConnector.h"
+#include "velox/connectors/hive/HiveDataSink.h"
 #include "velox/connectors/hive/TableHandle.h"
 #include "velox/connectors/tpch/TpchConnector.h"
 #include "velox/duckdb/conversion/DuckParser.h"
@@ -407,6 +408,44 @@ PlanBuilder& PlanBuilder::tableWrite(
 
 PlanBuilder& PlanBuilder::tableWrite(
     const std::string& outputDirectoryPath,
+    const dwio::common::FileFormat fileFormat,
+    const std::string_view& connectorId,
+    uint64_t fileSizeThreshold,
+    const std::vector<std::string>& sortKeyColumns,
+    const std::string& timeColumn,
+    std::function<std::string(int)> fileNameGenerator,
+    const std::shared_ptr<dwio::common::WriterOptions>& options) {
+  // Create compact property with custom file name generator
+  auto compactProperty = fileNameGenerator
+      ? std::make_shared<connector::hive::CompactProperty>(
+            true, // enabled
+            fileSizeThreshold,
+            sortKeyColumns,
+            timeColumn,
+            std::move(fileNameGenerator))
+      : std::make_shared<connector::hive::CompactProperty>(
+            true, // enabled
+            fileSizeThreshold,
+            sortKeyColumns,
+            timeColumn);
+
+  return tableWrite(
+      outputDirectoryPath,
+      {},
+      0,
+      {},
+      {},
+      fileFormat,
+      {},
+      connectorId,
+      {},
+      options,
+      "",
+      compactProperty);
+}
+
+PlanBuilder& PlanBuilder::tableWrite(
+    const std::string& outputDirectoryPath,
     const std::vector<std::string>& partitionBy,
     int32_t bucketCount,
     const std::vector<std::string>& bucketedBy,
@@ -416,7 +455,8 @@ PlanBuilder& PlanBuilder::tableWrite(
     const std::string_view& connectorId,
     const std::unordered_map<std::string, std::string>& serdeParameters,
     const std::shared_ptr<dwio::common::WriterOptions>& options,
-    const std::string& outputFileName) {
+    const std::string& outputFileName,
+    const std::shared_ptr<connector::hive::CompactProperty>& compactProperty) {
   VELOX_CHECK_NOT_NULL(planNode_, "TableWrite cannot be the source node");
   auto rowType = planNode_->outputType();
 
@@ -453,7 +493,8 @@ PlanBuilder& PlanBuilder::tableWrite(
       bucketProperty,
       common::CompressionKind_NONE,
       serdeParameters,
-      options);
+      options,
+      compactProperty);
 
   auto insertHandle = std::make_shared<core::InsertTableHandle>(
       std::string(connectorId), hiveHandle);

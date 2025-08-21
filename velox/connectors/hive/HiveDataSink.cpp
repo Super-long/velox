@@ -34,6 +34,10 @@
 #include <boost/uuid/uuid_generators.hpp>
 #include <boost/uuid/uuid_io.hpp>
 
+#include <algorithm>
+#include <cctype>
+#include <sstream>
+
 using facebook::velox::common::testutil::TestValue;
 
 namespace facebook::velox::connector::hive {
@@ -195,6 +199,7 @@ uint64_t getFinishTimeSliceLimitMsFromHiveConfig(
       ? std::numeric_limits<uint64_t>::max()
       : flushTimeSliceLimitMsFromConfig;
 }
+
 } // namespace
 
 const HiveWriterId& HiveWriterId::unpartitionedId() {
@@ -401,16 +406,89 @@ HiveDataSink::HiveDataSink(
       spillConfig_(connectorQueryCtx->spillConfig()),
       sortWriterFinishTimeSliceLimitMs_(getFinishTimeSliceLimitMsFromHiveConfig(
           hiveConfig_,
-          connectorQueryCtx->sessionProperties())) {
-  if (isBucketed()) {
-    VELOX_USER_CHECK_LT(
-        bucketCount_, maxBucketCount(), "bucketCount exceeds the limit");
+          connectorQueryCtx->sessionProperties())),
+      compactModeEnabled_(insertTableHandle_->compactProperty() != nullptr),
+      compactFileSizeThreshold_(
+          insertTableHandle_->compactProperty() != nullptr
+              ? insertTableHandle_->compactProperty()->fileSizeThreshold()
+              : 0),
+      compactSortKeyColumns_(
+          insertTableHandle_->compactProperty() != nullptr
+              ? insertTableHandle_->compactProperty()->sortKeyColumns()
+              : std::vector<std::string>()),
+      compactTimeColumn_(
+          insertTableHandle_->compactProperty() != nullptr
+              ? insertTableHandle_->compactProperty()->timeColumn()
+              : "") {
+  // Initialize custom file name generator if provided
+  if (isCompactMode() &&
+      insertTableHandle_->compactProperty()->hasCustomFileNameGenerator()) {
+    customFileNameGenerator_ =
+        insertTableHandle_->compactProperty()->fileNameGenerator();
   }
-  VELOX_USER_CHECK(
-      (commitStrategy_ == CommitStrategy::kNoCommit) ||
-          (commitStrategy_ == CommitStrategy::kTaskCommit),
-      "Unsupported commit strategy: {}",
-      commitStrategyToString(commitStrategy_));
+
+  // Initialize compact mode if enabled
+  if (isCompactMode()) {
+    VELOX_USER_CHECK(
+        !isPartitioned() && !isBucketed(),
+        "Compact mode cannot be used with partitioned or bucketed tables");
+
+    // Initialize sort key column indices
+    const auto nonPartitionTypes =
+        getNonPartitionTypes(dataChannels_, inputType_);
+    const auto& sortKeyColumns =
+        insertTableHandle_->compactProperty()->sortKeyColumns();
+    VELOX_USER_CHECK(
+        !sortKeyColumns.empty(),
+        "Sort key columns must be set when compact mode is enabled");
+    for (const auto& columnName : sortKeyColumns) {
+      auto columnIndex = nonPartitionTypes->getChildIdxIfExists(columnName);
+      if (columnIndex.has_value()) {
+        compactSortKeyColumnIndices_.push_back(columnIndex.value());
+
+        // Validate that sort key column is VARBINARY type
+        auto sortKeyColumnType =
+            nonPartitionTypes->childAt(columnIndex.value());
+        if (sortKeyColumnType->kind() != TypeKind::VARBINARY) {
+          VELOX_USER_FAIL(
+              "Sort key column '{}' must be VARBINARY type, but got '{}'",
+              columnName,
+              sortKeyColumnType->toString());
+        }
+      } else {
+        VELOX_USER_FAIL("Sort key column '{}' not found in input", columnName);
+      }
+    }
+
+    // Initialize time column index and validate type
+    compactTimeColumnIndex_ =
+        static_cast<column_index_t>(-1); // Initialize to invalid
+    const auto& timeColumn =
+        insertTableHandle_->compactProperty()->timeColumn();
+    VELOX_USER_CHECK(
+        !timeColumn.empty(),
+        "Time column must be set when compact mode is enabled");
+    if (!timeColumn.empty()) {
+      auto timeColumnIndex = nonPartitionTypes->getChildIdxIfExists(timeColumn);
+      if (timeColumnIndex.has_value()) {
+        compactTimeColumnIndex_ = timeColumnIndex.value();
+
+        // Validate that time column is BIGINT type
+        auto timeColumnType =
+            nonPartitionTypes->childAt(timeColumnIndex.value());
+        if (timeColumnType->kind() != TypeKind::BIGINT) {
+          VELOX_USER_FAIL(
+              "Time column '{}' must be BIGINT type, but got '{}'",
+              timeColumn,
+              timeColumnType->toString());
+        }
+      } else {
+        VELOX_USER_FAIL("Time column '{}' not found in input", timeColumn);
+      }
+    }
+
+    return;
+  }
 
   if (!isBucketed()) {
     return;
@@ -444,6 +522,24 @@ bool HiveDataSink::canReclaim() const {
 
 void HiveDataSink::appendData(RowVectorPtr input) {
   checkRunning();
+
+  // Handle compact mode
+  if (isCompactMode()) {
+    // Check if we need to switch to a new file
+    if (shouldSwitchFile()) {
+      switchToNewFile();
+    }
+
+    // Ensure we have a writer
+    if (writers_.empty()) {
+      switchToNewFile();
+    }
+
+    // Write data and update statistics
+    write(currentWriterIndex_, input);
+    updateFileStats(currentWriterIndex_, input);
+    return;
+  }
 
   // Write to unpartitioned (and unbucketed) table.
   if (!isPartitioned() && !isBucketed()) {
@@ -639,6 +735,15 @@ bool HiveDataSink::finish() {
 
 std::vector<std::string> HiveDataSink::close() {
   setState(State::kClosed);
+
+  // Update final file sizes for compact mode
+  if (isCompactMode()) {
+    for (size_t i = 0; i < compactFileStats_.size() && i < ioStats_.size();
+         ++i) {
+      compactFileStats_[i].fileSize = ioStats_[i]->rawBytesWritten();
+    }
+  }
+
   closeInternal();
 
   std::vector<std::string> partitionUpdates;
@@ -646,9 +751,70 @@ std::vector<std::string> HiveDataSink::close() {
   for (int i = 0; i < writerInfo_.size(); ++i) {
     const auto& info = writerInfo_.at(i);
     VELOX_CHECK_NOT_NULL(info);
-    // clang-format off
-      auto partitionUpdateJson = folly::toJson(
-       folly::dynamic::object
+
+    std::string partitionUpdateJson;
+
+    if (isCompactMode() && i < compactFileStats_.size()) {
+      // Compact mode: include statistics information
+      const auto& stats = compactFileStats_[i];
+
+      // Create sort key statistics
+      folly::dynamic sortKeyStats = folly::dynamic::object;
+      const auto& sortKeyColumns =
+          insertTableHandle_->compactProperty()->sortKeyColumns();
+
+      if (stats.sortKeyInitialized && !sortKeyColumns.empty()) {
+        folly::dynamic minValues = folly::dynamic::array;
+        folly::dynamic maxValues = folly::dynamic::array;
+
+        for (size_t i = 0;
+             i < sortKeyColumns.size() && i < stats.sortKeyMinValues.size() &&
+             i < stats.sortKeyMaxValues.size(); ++i) {
+          const auto& minValue = stats.sortKeyMinValues[i];
+          const auto& maxValue = stats.sortKeyMaxValues[i];
+
+          if (!minValue.empty() && !maxValue.empty()) {
+            minValues.push_back(minValue);
+            maxValues.push_back(maxValue);
+          }
+        }
+
+        if (!minValues.empty() && !maxValues.empty()) {
+          sortKeyStats["min"] = minValues;
+          sortKeyStats["max"] = maxValues;
+        }
+      }
+
+      // Create time column statistics
+      folly::dynamic timeColumnStats = folly::dynamic::object;
+      if (!compactTimeColumn_.empty()) {
+        timeColumnStats = folly::dynamic::object(
+            "min", stats.timeColumnMinValue)("max", stats.timeColumnMaxValue);
+      }
+
+      // clang-format off
+      partitionUpdateJson = folly::toJson(
+        folly::dynamic::object
+          ("part_index", i)
+          ("writePath", info->writerParameters.writeDirectory())
+          ("targetPath", info->writerParameters.targetDirectory())
+          ("fileWriteInfos", folly::dynamic::object
+              ("writeFileName", info->writerParameters.writeFileName())
+              ("targetFileName", info->writerParameters.targetFileName())
+              ("fileSize", ioStats_.at(i)->rawBytesWritten()))
+          ("rowCount", info->numWrittenRows)
+          ("onDiskDataSizeInBytes", ioStats_.at(i)->rawBytesWritten())
+          ("compactStats", folly::dynamic::object
+              ("sortKeyStats", sortKeyStats)
+              ("timeColumnStats", timeColumnStats)
+              ("sortKeyColumns", ISerializable::serialize(insertTableHandle_->compactProperty()->sortKeyColumns()))
+              ("timeColumn", insertTableHandle_->compactProperty()->timeColumn()))
+      );
+    } else {
+      // Standard mode: use existing logic
+      // clang-format off
+      partitionUpdateJson = folly::toJson(
+        folly::dynamic::object
           ("name", info->writerParameters.partitionName().value_or(""))
           ("updateMode",
             HiveWriterParameters::updateModeToString(
@@ -661,12 +827,14 @@ std::vector<std::string> HiveDataSink::close() {
               ("targetFileName", info->writerParameters.targetFileName())
               ("fileSize", ioStats_.at(i)->rawBytesWritten())))
           ("rowCount", info->numWrittenRows)
-         // TODO(gaoge): track and send the fields when inMemoryDataSizeInBytes
-         // and containsNumberedFileNames are needed at coordinator when file_renaming_enabled are turned on.
+          // TODO(gaoge): track and send the fields when inMemoryDataSizeInBytes
+          // and containsNumberedFileNames are needed at coordinator when file_renaming_enabled are turned on.
           ("inMemoryDataSizeInBytes", 0)
           ("onDiskDataSizeInBytes", ioStats_.at(i)->rawBytesWritten())
           ("containsNumberedFileNames", true));
-    // clang-format on
+      // clang-format on
+    }
+
     partitionUpdates.push_back(partitionUpdateJson);
   }
   return partitionUpdates;
@@ -917,7 +1085,11 @@ std::pair<std::string, std::string> HiveDataSink::getWriterFileNames(
     std::optional<uint32_t> bucketId) const {
   auto targetFileName = insertTableHandle_->locationHandle()->targetFileName();
   const bool generateFileName = targetFileName.empty();
-  if (bucketId.has_value()) {
+
+  // Use custom file name generator if available and in compact mode
+  if (isCompactMode() && customFileNameGenerator_ && generateFileName) {
+    targetFileName = customFileNameGenerator_(writers_.size());
+  } else if (bucketId.has_value()) {
     VELOX_CHECK(generateFileName);
     // TODO: add hive.file_renaming_enabled support.
     targetFileName = computeBucketedFileName(
@@ -1021,6 +1193,11 @@ folly::dynamic HiveInsertTableHandle::serialize() const {
     params[key] = value;
   }
   obj["serdeParameters"] = params;
+
+  if (compactProperty_) {
+    obj["compactProperty"] = compactProperty_->serialize();
+  }
+
   return obj;
 }
 
@@ -1050,13 +1227,21 @@ HiveInsertTableHandlePtr HiveInsertTableHandle::create(
     serdeParameters.emplace(pair.first.asString(), pair.second.asString());
   }
 
+  std::shared_ptr<const CompactProperty> compactProperty;
+  if (obj.count("compactProperty") > 0) {
+    compactProperty =
+        ISerializable::deserialize<CompactProperty>(obj["compactProperty"]);
+  }
+
   return std::make_shared<HiveInsertTableHandle>(
       inputColumns,
       locationHandle,
       storageFormat,
       bucketProperty,
       compressionKind,
-      serdeParameters);
+      serdeParameters,
+      nullptr, // writerOptions
+      compactProperty);
 }
 
 void HiveInsertTableHandle::registerSerDe() {
@@ -1090,6 +1275,11 @@ std::string HiveInsertTableHandle::toString() const {
       out << "[" << key << ", " << value << "] ";
     }
   }
+
+  if (compactProperty_) {
+    out << ", compactProperty: " << compactProperty_->toString();
+  }
+
   out << "]";
   return out.str();
 }
@@ -1187,5 +1377,209 @@ uint64_t HiveDataSink::WriterReclaimer::reclaim(
         pool->treeMemoryUsage());
   }
   return reclaimedBytes;
+}
+
+folly::dynamic CompactProperty::serialize() const {
+  folly::dynamic obj = folly::dynamic::object;
+  obj["name"] = "CompactProperty";
+  obj["enabled"] = enabled_;
+  obj["fileSizeThreshold"] = static_cast<int64_t>(fileSizeThreshold_);
+  obj["sortKeyColumns"] = ISerializable::serialize(sortKeyColumns_);
+  obj["timeColumn"] = timeColumn_;
+  obj["hasCustomFileNameGenerator"] = hasCustomFileNameGenerator();
+  return obj;
+}
+
+std::shared_ptr<CompactProperty> CompactProperty::deserialize(
+    const folly::dynamic& obj,
+    void* context) {
+  const bool enabled = obj["enabled"].asBool();
+  const uint64_t fileSizeThreshold =
+      static_cast<uint64_t>(obj["fileSizeThreshold"].asInt());
+  const auto sortKeyColumns =
+      ISerializable::deserialize<std::vector<std::string>>(
+          obj["sortKeyColumns"]);
+  const std::string timeColumn = obj["timeColumn"].asString();
+
+  // Note: Custom file name generators cannot be deserialized
+  // They must be set at runtime through the appropriate constructor
+  return std::make_shared<CompactProperty>(
+      enabled, fileSizeThreshold, sortKeyColumns, timeColumn);
+}
+
+std::string CompactProperty::toString() const {
+  std::stringstream out;
+  out << "CompactProperty[enabled=" << (enabled_ ? "true" : "false");
+  out << ", fileSizeThreshold=" << fileSizeThreshold_;
+  out << ", sortKeyColumns=[";
+  for (size_t i = 0; i < sortKeyColumns_.size(); ++i) {
+    if (i > 0)
+      out << ", ";
+    out << sortKeyColumns_[i];
+  }
+  out << "], timeColumn=" << timeColumn_ << "]";
+  return out.str();
+}
+
+void CompactProperty::registerSerDe() {
+  auto& registry = DeserializationWithContextRegistryForSharedPtr();
+  registry.Register("CompactProperty", CompactProperty::deserialize);
+}
+
+bool HiveDataSink::isCompactMode() const {
+  return insertTableHandle_->compactProperty() != nullptr &&
+      insertTableHandle_->compactProperty()->enabled();
+}
+
+bool HiveDataSink::shouldSwitchFile() const {
+  if (!isCompactMode() || writers_.empty()) {
+    return false;
+  }
+
+  const auto& currentStats = ioStats_[currentWriterIndex_];
+
+  return currentStats->rawBytesWritten() >=
+      insertTableHandle_->compactProperty()->fileSizeThreshold();
+}
+
+void HiveDataSink::switchToNewFile() {
+  if (!isCompactMode()) {
+    return;
+  }
+
+  // Finish current writer if it exists and update final file size
+  if (!writers_.empty() && currentWriterIndex_ < compactFileStats_.size()) {
+    WRITER_NON_RECLAIMABLE_SECTION_GUARD(currentWriterIndex_);
+    writers_[currentWriterIndex_]->finish();
+
+    // Update final file size
+    if (currentWriterIndex_ < ioStats_.size()) {
+      compactFileStats_[currentWriterIndex_].fileSize =
+          ioStats_[currentWriterIndex_]->rawBytesWritten();
+    }
+  }
+
+  // Create new writer with unique ID
+  // Use the current number of writers as a unique partition ID to avoid
+  // conflicts
+  uint32_t uniquePartitionId = static_cast<uint32_t>(writers_.size());
+  HiveWriterId uniqueWriterId{uniquePartitionId};
+  currentWriterIndex_ = appendWriter(uniqueWriterId);
+
+  // Initialize file stats for the new file
+  compactFileStats_.emplace_back();
+}
+
+void HiveDataSink::updateFileStats(
+    size_t writerIndex,
+    const RowVectorPtr& input) {
+  if (!isCompactMode() || writerIndex >= compactFileStats_.size()) {
+    return;
+  }
+
+  auto& stats = compactFileStats_[writerIndex];
+  const size_t previousRows = stats.numRows;
+  stats.numRows += input->size();
+
+  // Update sort key column statistics (simplified for sorted data)
+  collectSortKeyColumnStats(input, stats);
+
+  // Update time column statistics (requires full comparison)
+  collectTimeColumnStats(input, compactTimeColumnIndex_, stats);
+}
+
+void HiveDataSink::collectSortKeyColumnStats(
+    const RowVectorPtr& input,
+    CompactFileStats& stats) {
+  if (compactSortKeyColumnIndices_.empty() || !input || input->size() == 0) {
+    return;
+  }
+
+  const auto& sortKeyColumns =
+      insertTableHandle_->compactProperty()->sortKeyColumns();
+
+  // Ensure the vectors are large enough
+  if (stats.sortKeyMinValues.size() < sortKeyColumns.size()) {
+    stats.sortKeyMinValues.resize(sortKeyColumns.size());
+    stats.sortKeyMaxValues.resize(sortKeyColumns.size());
+  }
+
+  // Set minimum values from the first row (only if not already initialized)
+  if (!stats.sortKeyInitialized) {
+    for (size_t i = 0; i < compactSortKeyColumnIndices_.size(); ++i) {
+      const auto columnIndex = compactSortKeyColumnIndices_[i];
+      auto column = input->childAt(columnIndex);
+      if (!column || column->size() == 0) {
+        continue;
+      }
+
+      // Use the first row, regardless of null values
+      if (!column->isNullAt(0)) {
+        auto varbinaryColumn = column->as<SimpleVector<StringView>>();
+        VELOX_CHECK_NOT_NULL(
+            varbinaryColumn, "Sort key column should be VARBINARY type");
+
+        stats.sortKeyMinValues[i] = varbinaryColumn->valueAt(0).str();
+      }
+    }
+    stats.sortKeyInitialized = true;
+  }
+
+  // Always update maximum values from the last row
+  vector_size_t lastRow = input->size() - 1;
+  for (size_t i = 0; i < compactSortKeyColumnIndices_.size(); ++i) {
+    const auto columnIndex = compactSortKeyColumnIndices_[i];
+    if (columnIndex >= input->childrenSize()) {
+      continue;
+    }
+
+    auto column = input->childAt(columnIndex);
+    if (!column || column->size() == 0) {
+      continue;
+    }
+
+    // Use the last row, regardless of null values
+    if (!column->isNullAt(lastRow)) {
+      auto varbinaryColumn = column->as<SimpleVector<StringView>>();
+      VELOX_CHECK_NOT_NULL(
+          varbinaryColumn, "Sort key column should be VARBINARY type");
+
+      stats.sortKeyMaxValues[i] = varbinaryColumn->valueAt(lastRow).str();
+    }
+  }
+}
+
+void HiveDataSink::collectTimeColumnStats(
+    const RowVectorPtr& input,
+    column_index_t columnIndex,
+    CompactFileStats& stats) {
+  // Check if time column is configured and valid
+  if (columnIndex == static_cast<column_index_t>(-1) ||
+      columnIndex >= input->childrenSize()) {
+    return;
+  }
+
+  auto column = input->childAt(columnIndex);
+  if (!column || column->size() == 0) {
+    return;
+  }
+
+  auto timeColumn = column->as<SimpleVector<int64_t>>();
+  VELOX_CHECK_NOT_NULL(timeColumn, "Time column should be int64_t type");
+
+  for (vector_size_t i = 0; i < column->size(); ++i) {
+    if (column->isNullAt(i)) {
+      continue;
+    }
+
+    int64_t value = timeColumn->valueAt(i);
+
+    if (value < stats.timeColumnMinValue) {
+      stats.timeColumnMinValue = value;
+    }
+    if (value > stats.timeColumnMaxValue) {
+      stats.timeColumnMaxValue = value;
+    }
+  }
 }
 } // namespace facebook::velox::connector::hive
