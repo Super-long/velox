@@ -25,6 +25,7 @@
 #include <aws/s3/model/HeadObjectResult.h>
 #include <fmt/format.h>
 #include <folly/Uri.h>
+#include <regex>
 
 #include "velox/common/base/Exceptions.h"
 
@@ -92,14 +93,45 @@ inline void getBucketAndKeyFromPath(
   key = path.substr(firstSep + 1);
 }
 
-// TODO: Correctness check for bucket name.
-// 1. Length between 3 and 63:
-//    3 < length(bucket) < 63
-// 2. Mandatory label notation - regexp:
-//    regexp="(^[a-z0-9])([.-]?[a-z0-9]+){2,62}([/]?$)"
-// 3. Disallowed IPv4 notation - regexp:
-//    regexp="^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}[/]?$"
+// Validates S3 bucket name according to AWS naming rules
+inline bool isValidS3BucketName(std::string_view bucket) {
+  // Check length: must be between 3 and 63 characters
+  if (bucket.length() < 3 || bucket.length() > 63) {
+    return false;
+  }
+
+  // Check for IPv4 notation pattern
+  static const std::regex ipv4Pattern(
+      R"(^((25[0-5]|(2[0-4]|1\d|[1-9]|)\d)\.?\b){4}[/]?$)");
+  if (std::regex_match(bucket.begin(), bucket.end(), ipv4Pattern)) {
+    return false;
+  }
+
+  // Check mandatory label notation: must start/end with alphanumeric,
+  // can contain dots and hyphens in between
+  static const std::regex labelPattern(
+      R"(^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$)");
+  if (!std::regex_match(bucket.begin(), bucket.end(), labelPattern)) {
+    return false;
+  }
+
+  // Additional checks for consecutive dots
+  if (bucket.find("..") != std::string_view::npos) {
+    return false;
+  }
+
+  return true;
+}
+
 inline std::string s3URI(std::string_view bucket, std::string_view key) {
+  VELOX_USER_CHECK(
+      isValidS3BucketName(bucket),
+      "Invalid S3 bucket name '{}'. Bucket names must be 3-63 characters long, "
+      "contain only lowercase letters, numbers, dots, and hyphens, "
+      "start and end with alphanumeric characters, "
+      "not contain consecutive dots, and not be in IPv4 format.",
+      bucket);
+  
   std::stringstream ss;
   ss << kS3Scheme << bucket << kSep << key;
   return ss.str();
