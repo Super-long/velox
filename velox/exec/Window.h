@@ -37,6 +37,23 @@ namespace facebook::velox::exec {
 /// approach pending some profiling results.
 class Window : public Operator {
  public:
+  /// Runtime metrics specific to Window operator.
+  static inline const std::string kWindowBuildWallNanos{"windowBuildWallNanos"};
+  static inline const std::string kWindowFunctionCallsWallNanos{"windowFunctionCallsWallNanos"};
+  static inline const std::string kFrameComputationWallNanos{"frameComputationWallNanos"};
+  static inline const std::string kPeerComputationWallNanos{"peerComputationWallNanos"};
+  static inline const std::string kPartitionProcessingWallNanos{"partitionProcessingWallNanos"};
+  static inline const std::string kNumPartitions{"numPartitions"};
+  static inline const std::string kNumWindowFunctions{"numWindowFunctions"};
+  static inline const std::string kMaxPartitionRows{"maxPartitionRows"};
+  static inline const std::string kMinPartitionRows{"minPartitionRows"};
+  static inline const std::string kTotalPartitionRows{"totalPartitionRows"};
+  static inline const std::string kFrameBufferAllocations{"frameBufferAllocations"};
+  static inline const std::string kPeerBufferAllocations{"peerBufferAllocations"};
+  static inline const std::string kWindowFunctionCalls{"windowFunctionCalls"};
+  static inline const std::string kFrameComputations{"frameComputations"};
+  static inline const std::string kSortWallNanos{"sortWallNanos"};
+  static inline const std::string kInputProcessingWallNanos{"inputProcessingWallNanos"};
   Window(
       int32_t operatorId,
       DriverCtx* driverCtx,

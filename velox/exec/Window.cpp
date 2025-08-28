@@ -19,6 +19,7 @@
 #include "velox/exec/RowsStreamingWindowBuild.h"
 #include "velox/exec/SortWindowBuild.h"
 #include "velox/exec/Task.h"
+#include "velox/common/time/Timer.h"
 
 namespace facebook::velox::exec {
 
@@ -74,6 +75,23 @@ void Window::initialize() {
   createWindowFunctions();
   createPeerAndFrameBuffers();
   windowBuild_->setNumRowsPerOutput(numRowsPerOutput_);
+  
+  // Initialize window-specific runtime metrics
+  addRuntimeStat(kNumWindowFunctions, RuntimeCounter(windowFunctions_.size()));
+  {
+    auto lockedStats = stats_.wlock();
+    lockedStats->runtimeStats[kMinPartitionRows] = RuntimeMetric();
+    lockedStats->runtimeStats[kMinPartitionRows].min = std::numeric_limits<int64_t>::max();
+    lockedStats->runtimeStats[kMaxPartitionRows] = RuntimeMetric();
+    lockedStats->runtimeStats[kMaxPartitionRows].max = 0;
+  }
+  addRuntimeStat(kTotalPartitionRows, RuntimeCounter(0));
+  addRuntimeStat(kNumPartitions, RuntimeCounter(0));
+  addRuntimeStat(kWindowFunctionCalls, RuntimeCounter(0));
+  addRuntimeStat(kFrameComputations, RuntimeCounter(0));
+  addRuntimeStat(kFrameBufferAllocations, RuntimeCounter(0));
+  addRuntimeStat(kPeerBufferAllocations, RuntimeCounter(0));
+  
   windowNode_.reset();
 }
 
@@ -236,8 +254,12 @@ bool Window::supportRowsStreaming() {
 }
 
 void Window::addInput(RowVectorPtr input) {
+  CpuWallTimer timer{stats_.wlock()->addInputTiming};
   windowBuild_->addInput(input);
   numRows_ += input->size();
+  
+  // Track input processing metrics
+  addRuntimeStat(kInputProcessingWallNanos, RuntimeCounter(timer.elapsedNanos(), RuntimeCounter::Unit::kNanos));
 }
 
 void Window::reclaim(
@@ -268,6 +290,9 @@ void Window::createPeerAndFrameBuffers() {
       numRowsPerOutput_, operatorCtx_->pool());
   peerEndBuffer_ = AlignedBuffer::allocate<vector_size_t>(
       numRowsPerOutput_, operatorCtx_->pool());
+  
+  // Track peer buffer allocations
+  addRuntimeStat(kPeerBufferAllocations, RuntimeCounter(2));
 
   const auto numFuncs = windowFunctions_.size();
   frameStartBuffers_.reserve(numFuncs);
@@ -283,6 +308,9 @@ void Window::createPeerAndFrameBuffers() {
     frameEndBuffers_.push_back(frameEndBuffer);
     validFrames_.push_back(SelectivityVector(numRowsPerOutput_));
   }
+  
+  // Track frame buffer allocations (2 buffers per function)
+  addRuntimeStat(kFrameBufferAllocations, RuntimeCounter(numFuncs * 2));
 }
 
 void Window::noMoreInput() {
@@ -291,12 +319,34 @@ void Window::noMoreInput() {
 }
 
 void Window::callResetPartition() {
+  // Record metrics for the previous partition if it existed
+  if (currentPartition_ != nullptr) {
+    vector_size_t partitionRows = currentPartition_->numRows();
+    addRuntimeStat(kTotalPartitionRows, RuntimeCounter(partitionRows));
+    
+    // Update min and max partition rows
+    auto lockedStats = stats_.wlock();
+    auto& minPartitionRows = lockedStats->runtimeStats[kMinPartitionRows];
+    auto& maxPartitionRows = lockedStats->runtimeStats[kMaxPartitionRows];
+    
+    if (partitionRows < minPartitionRows.min) {
+      minPartitionRows.min = partitionRows;
+    }
+    if (partitionRows > maxPartitionRows.max) {
+      maxPartitionRows.max = partitionRows;
+    }
+  }
+  
   partitionOffset_ = 0;
   peerStartRow_ = 0;
   peerEndRow_ = 0;
   currentPartition_ = nullptr;
   if (windowBuild_->hasNextPartition()) {
     currentPartition_ = windowBuild_->nextPartition();
+    
+    // Count new partition
+    addRuntimeStat(kNumPartitions, RuntimeCounter(1));
+    
     for (int i = 0; i < windowFunctions_.size(); ++i) {
       windowFunctions_[i]->resetPartition(currentPartition_.get());
     }
@@ -513,6 +563,8 @@ void computeValidFrames(
 void Window::computePeerAndFrameBuffers(
     vector_size_t startRow,
     vector_size_t endRow) {
+  uint64_t startTime = getCurrentTimeNano();
+  
   const vector_size_t numRows = endRow - startRow;
   const vector_size_t numFuncs = windowFunctions_.size();
 
@@ -578,6 +630,13 @@ void Window::computePeerAndFrameBuffers(
           validFrames_[i]);
     }
   }
+  
+  // Record peer computation time
+  uint64_t peerComputeNanos = getCurrentTimeNano() - startTime;
+  addRuntimeStat(kPeerComputationWallNanos, RuntimeCounter(peerComputeNanos, RuntimeCounter::Unit::kNanos));
+  
+  // Track frame computations count
+  addRuntimeStat(kFrameComputations, RuntimeCounter(numFuncs));
 }
 
 void Window::getInputColumns(
@@ -605,6 +664,9 @@ void Window::callApplyForPartitionRows(
 
   getInputColumns(startRow, endRow, resultOffset, result);
   vector_size_t numFuncs = windowFunctions_.size();
+  
+  // Measure window function calls time
+  uint64_t windowFunctionStartTime = getCurrentTimeNano();
   for (auto i = 0; i < numFuncs; ++i) {
     windowFunctions_[i]->apply(
         peerStartBuffer_,
@@ -615,6 +677,11 @@ void Window::callApplyForPartitionRows(
         resultOffset,
         result->childAt(numInputColumns_ + i));
   }
+  uint64_t windowFunctionNanos = getCurrentTimeNano() - windowFunctionStartTime;
+  addRuntimeStat(kWindowFunctionCallsWallNanos, RuntimeCounter(windowFunctionNanos, RuntimeCounter::Unit::kNanos));
+  
+  // Track window function calls count
+  addRuntimeStat(kWindowFunctionCalls, RuntimeCounter(numFuncs));
 
   const vector_size_t numRows = endRow - startRow;
   numProcessedRows_ += numRows;
@@ -628,6 +695,8 @@ void Window::callApplyForPartitionRows(
 vector_size_t Window::callApplyLoop(
     vector_size_t numOutputRows,
     const RowVectorPtr& result) {
+  uint64_t partitionProcessingStartTime = getCurrentTimeNano();
+  
   // Compute outputs by traversing as many partitions as possible. This
   // logic takes care of partial partitions output also.
   vector_size_t resultIndex = 0;
@@ -674,6 +743,10 @@ vector_size_t Window::callApplyLoop(
       break;
     }
   }
+
+  // Record partition processing time
+  uint64_t partitionProcessingNanos = getCurrentTimeNano() - partitionProcessingStartTime;
+  addRuntimeStat(kPartitionProcessingWallNanos, RuntimeCounter(partitionProcessingNanos, RuntimeCounter::Unit::kNanos));
 
   // Return the number of processed rows.
   return numOutputRows - numOutputRowsLeft;

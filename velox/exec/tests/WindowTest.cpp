@@ -749,5 +749,62 @@ TEST_F(WindowTest, NaNFrameBound) {
   }
 }
 
+TEST_F(WindowTest, runtimeMetrics) {
+  // Create test data with multiple partitions
+  auto data = makeRowVector({
+      makeFlatVector<int32_t>({1, 1, 1, 2, 2, 2, 3, 3, 3}),
+      makeFlatVector<int64_t>({10, 20, 30, 40, 50, 60, 70, 80, 90}),
+  });
+
+  // Test window function with row_number() across multiple partitions
+  auto plan = PlanBuilder()
+                  .values({data})
+                  .window({"row_number() over (partition by c0 order by c1)"})
+                  .planNode();
+
+  auto task = AssertQueryBuilder(plan).maxDrivers(1).task();
+  auto opStats = toPlanStats(task->taskStats()).at(plan->id()).operatorStats;
+  auto windowStats = opStats.at("Window");
+
+  // Verify our new runtime metrics are present and have reasonable values
+  ASSERT_TRUE(windowStats.runtimeStats.count("numPartitions"));
+  ASSERT_EQ(windowStats.runtimeStats.at("numPartitions").sum, 3); // 3 partitions
+
+  ASSERT_TRUE(windowStats.runtimeStats.count("numWindowFunctions"));
+  ASSERT_EQ(windowStats.runtimeStats.at("numWindowFunctions").sum, 1); // 1 function
+
+  ASSERT_TRUE(windowStats.runtimeStats.count("windowFunctionCalls"));
+  ASSERT_GT(windowStats.runtimeStats.at("windowFunctionCalls").sum, 0);
+
+  ASSERT_TRUE(windowStats.runtimeStats.count("frameComputations"));
+  ASSERT_GT(windowStats.runtimeStats.at("frameComputations").sum, 0);
+
+  ASSERT_TRUE(windowStats.runtimeStats.count("totalPartitionRows"));
+  ASSERT_EQ(windowStats.runtimeStats.at("totalPartitionRows").sum, 9); // Total 9 rows
+
+  ASSERT_TRUE(windowStats.runtimeStats.count("maxPartitionRows"));
+  ASSERT_EQ(windowStats.runtimeStats.at("maxPartitionRows").max, 3); // Each partition has 3 rows
+
+  ASSERT_TRUE(windowStats.runtimeStats.count("minPartitionRows"));
+  ASSERT_EQ(windowStats.runtimeStats.at("minPartitionRows").min, 3); // Each partition has 3 rows
+
+  // Verify timing metrics are present and non-zero
+  ASSERT_TRUE(windowStats.runtimeStats.count("windowFunctionCallsWallNanos"));
+  ASSERT_GT(windowStats.runtimeStats.at("windowFunctionCallsWallNanos").sum, 0);
+
+  ASSERT_TRUE(windowStats.runtimeStats.count("peerComputationWallNanos"));
+  ASSERT_GT(windowStats.runtimeStats.at("peerComputationWallNanos").sum, 0);
+
+  ASSERT_TRUE(windowStats.runtimeStats.count("partitionProcessingWallNanos"));
+  ASSERT_GT(windowStats.runtimeStats.at("partitionProcessingWallNanos").sum, 0);
+
+  // Verify buffer allocation metrics
+  ASSERT_TRUE(windowStats.runtimeStats.count("frameBufferAllocations"));
+  ASSERT_EQ(windowStats.runtimeStats.at("frameBufferAllocations").sum, 2); // 2 buffers per function
+
+  ASSERT_TRUE(windowStats.runtimeStats.count("peerBufferAllocations"));
+  ASSERT_EQ(windowStats.runtimeStats.at("peerBufferAllocations").sum, 2); // peer start + peer end
+}
+
 } // namespace
 } // namespace facebook::velox::exec
